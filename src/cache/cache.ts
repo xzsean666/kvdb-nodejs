@@ -11,6 +11,7 @@
 
 import type { KVStore, RawEntry } from "./types.js";
 import { MemoryStore } from "./stores/memory-store.js";
+import { SqliteCacheStore } from "./stores/sqlite-store.js";
 import { serialize, deserialize } from "../core/serializer.js";
 import { remainingTtl } from "../core/expiry.js";
 import { KvdbConfigError } from "../core/errors.js";
@@ -19,7 +20,10 @@ import { KvdbConfigError } from "../core/errors.js";
 export type CacheStoreSpec =
   | KVStore
   | "memory"
-  | { driver: "memory"; max?: number };
+  | "sqlite-memory"
+  | { driver: "memory"; max?: number }
+  | { driver: "sqlite-memory"; table?: string }
+  | { driver: "sqlite"; file: string; table?: string };
 
 export interface CacheOptions {
   /** Ordered tiers, highest priority first. */
@@ -45,14 +49,19 @@ function isKVStore(spec: CacheStoreSpec): spec is KVStore {
 
 function resolveStore(spec: CacheStoreSpec): KVStore {
   if (isKVStore(spec)) return spec;
-  if (spec === "memory" || (typeof spec === "object" && spec.driver === "memory")) {
-    return new MemoryStore(typeof spec === "object" ? { max: spec.max } : {});
+  if (spec === "memory") return new MemoryStore();
+  if (spec === "sqlite-memory") return new SqliteCacheStore({ file: ":memory:" });
+  if (typeof spec === "object") {
+    switch (spec.driver) {
+      case "memory":
+        return new MemoryStore({ max: spec.max });
+      case "sqlite-memory":
+        return new SqliteCacheStore({ file: ":memory:", table: spec.table });
+      case "sqlite":
+        return new SqliteCacheStore({ file: spec.file, table: spec.table });
+    }
   }
-  throw new KvdbConfigError(
-    `Unsupported cache store spec: ${JSON.stringify(spec)} ` +
-      `(memory is built in; SQLite stores are wired in a later step — ` +
-      `pass a KVStore instance meanwhile)`,
-  );
+  throw new KvdbConfigError(`Unsupported cache store spec: ${JSON.stringify(spec)}`);
 }
 
 export class Cache {

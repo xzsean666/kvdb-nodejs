@@ -36,7 +36,32 @@ export { Cache } from "./cache/cache.js";
 export type { CacheOptions, CacheStoreSpec, WrapOptions } from "./cache/cache.js";
 export { MemoryStore } from "./cache/stores/memory-store.js";
 export type { MemoryStoreOptions } from "./cache/stores/memory-store.js";
+export { SqliteCacheStore } from "./cache/stores/sqlite-store.js";
+export type { SqliteStoreOptions } from "./cache/stores/sqlite-store.js";
 export type { KVStore, RawEntry, KVEntry } from "./cache/types.js";
+
+// Decorator caching (docs/SPEC.md §9). Requires TC39 standard decorators.
+export {
+  Cacheable,
+  CacheClear,
+  setDefaultCache,
+  clearDefaultCache,
+} from "./decorators/cacheable.js";
+export type { CacheableOptions, CacheClearOptions } from "./decorators/cacheable.js";
+export type { CacheableKey, CacheKeyBuilder } from "./decorators/cache-key.js";
+
+// Plugin / hook system (docs/ARCHITECTURE.md §5.5).
+export { HookRuntime } from "./plugins/runtime.js";
+export type {
+  Plugin,
+  PluginContext,
+  HookName,
+  HookFn,
+  HookPayloads,
+  WritePayload,
+  ReadPayload,
+  QueryPayload,
+} from "./plugins/types.js";
 
 // Errors.
 export {

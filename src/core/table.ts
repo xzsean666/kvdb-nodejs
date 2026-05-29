@@ -15,6 +15,7 @@ import { serialize, deserialize } from "./serializer.js";
 import { toPhysicalKey, toUserKey, toPhysicalPrefix, namespacePrefix } from "./key.js";
 import type { KeyScope } from "./key.js";
 import { parseWhere, parseFindOptions } from "../query/parser.js";
+import type { HookRuntime } from "../plugins/runtime.js";
 
 /** User-facing query document for `find` (parsed into the AST internally). */
 export interface FindQuery {
@@ -34,10 +35,16 @@ export interface TableDependencies {
   scope: KeyScope;
   /** Optional point-read cache shared from the KVDB instance. */
   cache?: Cache;
+  /** Hook runtime (no-op when no plugins are registered). */
+  hooks: HookRuntime;
 }
 
 export class Table<Value = JsonValue> {
   constructor(private readonly deps: TableDependencies) {}
+
+  private get namespace(): string {
+    return this.deps.scope.namespace;
+  }
 
   async set(key: string, value: Value, options: SetOptions = {}): Promise<void> {
     // KD-7: storing undefined is a deletion.
@@ -45,25 +52,42 @@ export class Table<Value = JsonValue> {
       await this.delete(key);
       return;
     }
+    const before = await this.deps.hooks.run("beforeWrite", {
+      namespace: this.namespace,
+      key,
+      value: value as JsonValue,
+      ttlMs: options.ttlMs,
+    });
     const driver = await this.deps.getDriver();
-    const physicalKey = toPhysicalKey(this.deps.scope, key);
-    const text = serialize(value);
-    await driver.set(physicalKey, text, options.ttlMs);
-    if (this.deps.cache) await this.deps.cache.set(physicalKey, value, options.ttlMs);
+    const physicalKey = toPhysicalKey(this.deps.scope, before.key);
+    await driver.set(physicalKey, serialize(before.value), before.ttlMs);
+    if (this.deps.cache) await this.deps.cache.set(physicalKey, before.value, before.ttlMs);
+    await this.deps.hooks.run("afterWrite", before);
   }
 
   async get(key: string): Promise<Value | undefined> {
     const physicalKey = toPhysicalKey(this.deps.scope, key);
-    if (this.deps.cache) {
-      const cached = await this.deps.cache.get<Value>(physicalKey);
-      if (cached !== undefined) return cached;
+    await this.deps.hooks.run("beforeRead", { namespace: this.namespace, key, value: undefined });
+
+    let value: Value | undefined;
+    const cached = this.deps.cache ? await this.deps.cache.get<Value>(physicalKey) : undefined;
+    if (cached !== undefined) {
+      value = cached;
+    } else {
+      const driver = await this.deps.getDriver();
+      const entry = await driver.get(physicalKey);
+      if (entry !== undefined) {
+        value = deserialize<Value>(entry.value);
+        if (this.deps.cache) await this.deps.cache.set(physicalKey, value);
+      }
     }
-    const driver = await this.deps.getDriver();
-    const entry = await driver.get(physicalKey);
-    if (entry === undefined) return undefined;
-    const value = deserialize<Value>(entry.value);
-    if (this.deps.cache) await this.deps.cache.set(physicalKey, value);
-    return value;
+
+    const after = await this.deps.hooks.run("afterRead", {
+      namespace: this.namespace,
+      key,
+      value: value as JsonValue | undefined,
+    });
+    return after.value as Value | undefined;
   }
 
   async delete(key: string): Promise<boolean> {
@@ -149,9 +173,13 @@ export class Table<Value = JsonValue> {
 
   async find(query: FindQuery = {}): Promise<{ key: string; value: Value }[]> {
     const driver = await this.deps.getDriver();
-    const where = parseWhere(query.where);
-    const options = parseFindOptions(query);
-    const entries = await driver.find(where, options);
+    const parsed = await this.deps.hooks.run("beforeQuery", {
+      namespace: this.namespace,
+      where: parseWhere(query.where),
+      options: parseFindOptions(query),
+    });
+    const entries = await driver.find(parsed.where, parsed.options);
+    await this.deps.hooks.run("afterQuery", parsed);
     return entries.map((entry) => ({
       key: toUserKey(this.deps.scope, entry.key),
       value: deserialize<Value>(entry.value),

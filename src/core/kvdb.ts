@@ -13,6 +13,8 @@ import { SqliteDriverFactory } from "../drivers/sqlite/sqlite-driver.js";
 import { Cache } from "../cache/cache.js";
 import type { CacheOptions } from "../cache/cache.js";
 import { Table } from "./table.js";
+import { HookRuntime } from "../plugins/runtime.js";
+import type { Plugin } from "../plugins/types.js";
 import type { JsonValue } from "../types/json.js";
 import { KvdbConfigError } from "./errors.js";
 
@@ -29,6 +31,8 @@ export interface KVDBOptions {
   table?: string;
   /** Optional cache: pass options to build one, or a pre-built Cache instance. */
   cache?: CacheOptions | Cache;
+  /** Plugins registered at construction; their hooks fire on every Table op. */
+  plugins?: Plugin[];
 }
 
 export interface TableOptions {
@@ -40,12 +44,15 @@ export class KVDB {
   private readonly factory: DriverFactory;
   private readonly tablePrefix: string;
   private readonly cache: Cache | undefined;
+  private readonly hooks: HookRuntime;
   private driverPromise: Promise<Driver> | undefined;
 
   constructor(options: KVDBOptions) {
     this.factory = createDriverFactory(options);
     this.tablePrefix = options.tablePrefix ?? "";
     this.cache = options.cache ? toCache(options.cache) : undefined;
+    this.hooks = new HookRuntime();
+    for (const plugin of options.plugins ?? []) this.hooks.register(plugin);
   }
 
   /** Create a namespaced Table. Values are typed via the `Value` parameter. */
@@ -55,6 +62,7 @@ export class KVDB {
       getDriver: () => this.getDriver(),
       scope: { tablePrefix: this.tablePrefix, namespace },
       cache,
+      hooks: this.hooks,
     });
   }
 
