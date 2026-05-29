@@ -1,0 +1,78 @@
+{
+  "name": "kvdb-sdk",
+  "version": "0.0.0",
+  "description": "High-performance, multi-driver, extensible KV Database SDK for Node.js — unified data interface, JSON query, and an independent cache system.",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22"
+  },
+  "packageManager": "pnpm@10.12.1",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:compliance": "vitest run test/compliance",
+    "lint": "eslint .",
+    "format": "prettier --write ."
+  },
+  "peerDependencies": {
+    "better-sqlite3": "*",
+    "mongodb": "*",
+    "pg": "*"
+  },
+  "peerDependenciesMeta": {
+    "better-sqlite3": {
+      "optional": true
+    },
+    "mongodb": {
+      "optional": true
+    },
+    "pg": {
+      "optional": true
+    }
+  },
+  "dependencies": {
+    "lru-cache": "^11.0.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.11",
+    "@types/node": "^22.0.0",
+    "better-sqlite3": "^11.0.0",
+    "tsup": "^8.0.0",
+    "typescript": "^5.8.0",
+    "vitest": "^2.0.0"
+  },
+  "keywords": [
+    "kv",
+    "key-value",
+    "database",
+    "sqlite",
+    "postgresql",
+    "mongodb",
+    "cache",
+    "json-query",
+    "typescript"
+  ],
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "better-sqlite3",
+      "esbuild"
+    ]
+  }
+}
