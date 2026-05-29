@@ -42,6 +42,11 @@ export interface MongoDriverOptions {
   database?: string;
   /** Collection name. Defaults to "kvdb_kv". */
   collection?: string;
+  /**
+   * JSON value paths to index when connecting (e.g. ["profile.age"]).
+   * Default: none — only the `_id` index Mongo creates automatically exists.
+   */
+  indexes?: string[];
 }
 
 export class MongoDriverFactory implements DriverFactory {
@@ -66,7 +71,9 @@ export class MongoDriverFactory implements DriverFactory {
     await client.connect();
     const db = this.options.database ? client.db(this.options.database) : client.db();
     const collection = db.collection<KvDocument>(this.options.collection ?? "kvdb_kv");
-    return new MongoDriver(client, db, collection);
+    const driver = new MongoDriver(client, db, collection);
+    for (const path of this.options.indexes ?? []) await driver.ensureIndex(path);
+    return driver;
   }
 }
 
@@ -182,8 +189,13 @@ class MongoDriver implements Driver {
     ).deletedCount;
   }
 
-  async find(where: QueryNode, options: FindOptions = {}): Promise<KVEntry[]> {
-    const filter = { $and: [this.liveFilter(Date.now()), compileMongoFilter(where)] };
+  async find(where: QueryNode, options: FindOptions = {}, keyPrefix?: string): Promise<KVEntry[]> {
+    const conditions: Record<string, unknown>[] = [
+      this.liveFilter(Date.now()),
+      compileMongoFilter(where),
+    ];
+    if (keyPrefix) conditions.push({ _id: { $regex: `^${escapeRegex(keyPrefix)}` } });
+    const filter = { $and: conditions };
     let cursor = this.collection.find(filter, { projection: { value: 1 } });
     if (options.sort && options.sort.length > 0) cursor = cursor.sort(compileMongoSort(options.sort));
     if (options.offset !== undefined) cursor = cursor.skip(options.offset);

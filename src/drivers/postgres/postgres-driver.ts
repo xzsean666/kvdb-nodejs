@@ -33,6 +33,12 @@ export interface PostgresDriverOptions {
   url: string;
   /** Physical table name. Defaults to "kvdb_kv". */
   table?: string;
+  /**
+   * JSON value paths to index when the table is created (e.g. ["profile.age"]).
+   * Default: none — only the `key` primary key and the internal expires_at /
+   * key-prefix indexes exist, so writes pay no JSON-index cost unless you opt in.
+   */
+  indexes?: string[];
 }
 
 const IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/;
@@ -69,8 +75,14 @@ export class PostgresDriverFactory implements DriverFactory {
         updated_at bigint NOT NULL
       );
       CREATE INDEX IF NOT EXISTS ${table}_expires_at ON ${table} (expires_at);
+      -- text_pattern_ops so prefix/namespace scans (key LIKE 'ns:%') use an
+      -- index: the default PK btree is unusable for LIKE under non-C collations
+      -- (e.g. en_US.UTF-8). See docs — verified via EXPLAIN against real PG.
+      CREATE INDEX IF NOT EXISTS ${table}_key_prefix ON ${table} (key text_pattern_ops);
     `);
-    return new PostgresDriver(pool, table);
+    const driver = new PostgresDriver(pool, table);
+    for (const path of this.options.indexes ?? []) await driver.ensureIndex(path);
+    return driver;
   }
 }
 
@@ -203,13 +215,16 @@ class PostgresDriver implements Driver {
     return result.rowCount ?? 0;
   }
 
-  async find(where: QueryNode, options: FindOptions = {}): Promise<KVEntry[]> {
+  async find(where: QueryNode, options: FindOptions = {}, keyPrefix?: string): Promise<KVEntry[]> {
     const compiled = compileWhere(where, this.dialect);
     const params: unknown[] = [...compiled.params];
     const nowIndex = params.push(Date.now());
 
     let sql = `SELECT key, value FROM ${this.table}
        WHERE (expires_at IS NULL OR expires_at > $${nowIndex}) AND (${compiled.sql})`;
+    if (keyPrefix) {
+      sql += ` AND key LIKE $${params.push(`${escapeLike(keyPrefix)}%`)}`;
+    }
     if (options.sort && options.sort.length > 0) {
       sql += ` ORDER BY ${compileOrderBy(options.sort, this.dialect)}`;
     }
@@ -222,9 +237,19 @@ class PostgresDriver implements Driver {
 
   async ensureIndex(jsonPath: string): Promise<void> {
     const path = parsePath(jsonPath);
-    const expression = this.dialect.scalarAt(path);
-    const indexName = `${this.table}_json_${jsonPath.replace(/[^A-Za-z0-9]/g, "_")}`;
-    await this.pool.query(`CREATE INDEX IF NOT EXISTS ${indexName} ON ${this.table} ((${expression}))`);
+    const safe = jsonPath.replace(/[^A-Za-z0-9]/g, "_");
+    // Two expression indexes: a TEXT one for string equality / $in / sort, and a
+    // NULL-safe NUMERIC one (CASE jsonb_typeof) for numeric range/eq. Queries
+    // pick the cast that matches the comparison value, so both shapes stay
+    // index-backed; the numeric index never fails to build on mixed-type rows.
+    const textExpr = this.dialect.scalarAt(path);
+    const numericExpr = this.dialect.scalarAt(path, 0);
+    await this.pool.query(
+      `CREATE INDEX IF NOT EXISTS ${this.table}_json_${safe} ON ${this.table} ((${textExpr}))`,
+    );
+    await this.pool.query(
+      `CREATE INDEX IF NOT EXISTS ${this.table}_json_${safe}_num ON ${this.table} ((${numericExpr}))`,
+    );
   }
 
   async purgeExpired(): Promise<number> {

@@ -182,7 +182,11 @@ export class Table<Value = JsonValue> {
       where: parseWhere(query.where),
       options: parseFindOptions(query),
     });
-    const entries = await driver.find(parsed.where, parsed.options);
+    const entries = await driver.find(
+      parsed.where,
+      parsed.options,
+      namespacePrefix(this.deps.scope),
+    );
     await this.deps.hooks.run("afterQuery", parsed);
 
     if (this.deps.autoIndex) {

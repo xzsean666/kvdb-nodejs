@@ -6,6 +6,13 @@
 // value's type (numeric/boolean), or numeric comparisons would sort lexically.
 // `#>>` over a *missing* path yields SQL NULL, giving a clean presence test via
 // jsonb_extract_path (NULL = absent), aligned with Mongo $exists semantics.
+//
+// The numeric/boolean cast is guarded by `jsonb_typeof(...) = '<type>'` inside a
+// CASE: a plain `(text)::numeric` THROWS on a row whose value at the path is a
+// string (e.g. one document storing `{age:"old"}`), which would crash an entire
+// query. The CASE yields NULL for the wrong type instead — Mongo-style type
+// bracketing — and never raises. ensureIndex builds an index on this exact
+// expression, so range/eq queries stay index-backed.
 
 import type { SqlDialect } from "../../query/compiler.js";
 import type { FieldPath } from "../../query/ast.js";
@@ -15,15 +22,25 @@ export class PostgresDialect implements SqlDialect {
   constructor(private readonly column: string = "value") {}
 
   scalarAt(path: FieldPath, valueHint?: JsonValue): string {
-    const text = `((${this.column})::jsonb #>> '{${pathArray(path)}}')`;
+    const json = `'{${pathArray(path)}}'`;
+    const text = `((${this.column})::jsonb #>> ${json})`;
     switch (typeof valueHint) {
       case "number":
-        return `(${text})::numeric`;
+        return this.typedCast(json, text, "number", "numeric");
       case "boolean":
-        return `(${text})::boolean`;
+        return this.typedCast(json, text, "boolean", "boolean");
       default:
         return text;
     }
+  }
+
+  /**
+   * `CASE WHEN jsonb_typeof(path) = '<jsonType>' THEN (text)::<sqlType> END` —
+   * a NULL-on-mismatch cast that never throws on heterogeneous JSON.
+   */
+  private typedCast(json: string, text: string, jsonType: string, sqlType: string): string {
+    const typeof_ = `jsonb_typeof((${this.column})::jsonb #> ${json})`;
+    return `(CASE WHEN ${typeof_} = '${jsonType}' THEN (${text})::${sqlType} END)`;
   }
 
   pathExists(path: FieldPath): string {

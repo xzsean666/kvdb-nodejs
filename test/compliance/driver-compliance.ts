@@ -170,6 +170,20 @@ export function describeDriverCompliance(label: string, makeDriver: MakeDriver):
       it("empty where matches all", async () => {
         expect(keys(await find({}))).toEqual(["u1", "u2", "u3"]);
       });
+
+      it("keyPrefix scopes the scan (namespace isolation)", async () => {
+        // Two logical namespaces sharing one physical store. find() with a
+        // keyPrefix must never leak across the boundary — the regression that
+        // the real-DB e2e suite caught.
+        await put("ns1:a", { tag: "x" });
+        await put("ns1:b", { tag: "x" });
+        await put("ns2:a", { tag: "x" });
+        const scoped = await driver.find(parseWhere({ tag: "x" }), parseFindOptions({}), "ns1:");
+        expect(keys(scoped)).toEqual(["ns1:a", "ns1:b"]);
+        // An empty where under a prefix is still confined to that prefix.
+        const all1 = await driver.find(parseWhere({}), parseFindOptions({}), "ns1:");
+        expect(keys(all1)).toEqual(["ns1:a", "ns1:b"]);
+      });
     });
 
     describe("ensureIndex", () => {

@@ -50,8 +50,13 @@ export interface Driver extends KVStore {
   getByPrefix(prefix: string): MaybePromise<KVEntry[]>;
   deleteByPrefix(prefix: string): MaybePromise<number>;
 
-  /** Execute a compiled query AST against stored JSON values. */
-  find(where: QueryNode, options?: FindOptions): MaybePromise<KVEntry[]>;
+  /**
+   * Execute a compiled query AST against stored JSON values. `keyPrefix`, when
+   * given, scopes the scan to keys starting with it — this is how the core
+   * confines a `find` to its namespace (without it, find would match the whole
+   * physical table across every namespace).
+   */
+  find(where: QueryNode, options?: FindOptions, keyPrefix?: string): MaybePromise<KVEntry[]>;
 
   /** Ensure an index exists for a JSON path (expression/GIN index). No-op allowed. */
   ensureIndex(jsonPath: string): MaybePromise<void>;

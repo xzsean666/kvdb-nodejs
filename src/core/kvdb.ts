@@ -32,6 +32,13 @@ export interface KVDBOptions {
   tablePrefix?: string;
   /** SQLite physical table name. Default "kvdb_kv". */
   table?: string;
+  /**
+   * JSON value paths to index when the backend is first connected
+   * (e.g. ["profile.age", "status"]). Default: none — the key is the primary
+   * key, and no value/JSON index is created unless you opt in here (or via
+   * `autoIndex` / `table.ensureIndex`).
+   */
+  indexes?: string[];
   /** Optional cache: pass options to build one, or a pre-built Cache instance. */
   cache?: CacheOptions | Cache;
   /** Plugins registered at construction; their hooks fire on every Table op. */
@@ -133,17 +140,29 @@ export class KVDB {
 function createDriverFactory(options: KVDBOptions): DriverFactory {
   switch (options.driver) {
     case "sqlite":
-      return new SqliteDriverFactory({ url: options.url, table: options.table });
+      return new SqliteDriverFactory({
+        url: options.url,
+        table: options.table,
+        indexes: options.indexes,
+      });
     case "postgresql":
       if (options.url === undefined) {
         throw new KvdbConfigError("The PostgreSQL driver requires a connection `url`.");
       }
-      return new PostgresDriverFactory({ url: options.url, table: options.table });
+      return new PostgresDriverFactory({
+        url: options.url,
+        table: options.table,
+        indexes: options.indexes,
+      });
     case "mongodb":
       if (options.url === undefined) {
         throw new KvdbConfigError("The MongoDB driver requires a connection `url`.");
       }
-      return new MongoDriverFactory({ url: options.url, collection: options.table });
+      return new MongoDriverFactory({
+        url: options.url,
+        collection: options.table,
+        indexes: options.indexes,
+      });
     default: {
       const unknown: never = options.driver;
       throw new KvdbConfigError(`Unknown driver: ${JSON.stringify(unknown)}`);

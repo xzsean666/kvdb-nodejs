@@ -7,3 +7,5 @@ dist/
 *.db-shm
 .DS_Store
 coverage/
+.env
+.env.test

@@ -33,6 +33,11 @@ export interface SqliteDriverOptions {
   url?: string;
   /** Physical table name. Defaults to "kvdb_kv". */
   table?: string;
+  /**
+   * JSON value paths to index when the table is created (e.g. ["profile.age"]).
+   * Default: none — only the `key` primary key and the expires_at index exist.
+   */
+  indexes?: string[];
 }
 
 export class SqliteDriverFactory implements DriverFactory {
@@ -53,7 +58,9 @@ export class SqliteDriverFactory implements DriverFactory {
     }
     const file = this.options.url ?? ":memory:";
     const database = new DatabaseCtor(file);
-    return new SqliteDriver(database, file, this.options.table ?? "kvdb_kv");
+    const driver = new SqliteDriver(database, file, this.options.table ?? "kvdb_kv");
+    for (const path of this.options.indexes ?? []) driver.ensureIndex(path);
+    return driver;
   }
 }
 
@@ -197,10 +204,14 @@ class SqliteDriver implements Driver {
       .run(`${escapeLike(prefix)}%`).changes;
   }
 
-  find(where: QueryNode, options: FindOptions = {}): KVEntry[] {
+  find(where: QueryNode, options: FindOptions = {}, keyPrefix?: string): KVEntry[] {
     const compiled = compileWhere(where, this.dialect);
     const clauses = [`(expires_at IS NULL OR expires_at > ?)`, `(${compiled.sql})`];
     const params: unknown[] = [Date.now(), ...compiled.params];
+    if (keyPrefix) {
+      clauses.push(`key LIKE ? ESCAPE '\\'`);
+      params.push(`${escapeLike(keyPrefix)}%`);
+    }
 
     let sql = `SELECT key, value FROM ${this.table} WHERE ${clauses.join(" AND ")}`;
     if (options.sort && options.sort.length > 0) {
