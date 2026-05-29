@@ -1,7 +1,18 @@
-# nextsession.md — 上下文交接(Step 3 产出)
+# nextsession.md — 上下文交接(Step 3 产出 + Step 4 进行中)
 
 > 每次会话开始先读 `AGENTS.md` 再读本文件。每完成一块工作后**更新本文件**。
-> 最后更新:2026-05-29。
+> 最后更新:2026-05-29(Step 4 进行中)。
+
+---
+
+## 0. 已拍板决策(用户确认)
+
+- 包名:**`kvdb-sdk`**。
+- 未连接时:**自动延迟建连**(首次操作触发,无需手动 `connect()`)。
+- 物理 key:`<tablePrefix><namespace>:<userKey>`,`:` 不可出现在 prefix/namespace,user key 可含 `:`。
+- 装饰器 key 默认:类名 + 方法名 + `stableStringify(args)`(实现中,见 backlog #12)。
+- API 统一 Promise 接口(SQLite 同步底层也包成 Promise)。
+- `find` 的 `where` path v1 用字符串。
 
 ---
 
@@ -12,9 +23,13 @@
 | Step 1 架构设计 | ✅ 完成 → `docs/ARCHITECTURE.md` |
 | Step 2 文档(SPEC/BUILD) | ✅ 完成 → `docs/SPEC.md`, `docs/BUILD.md` |
 | Step 3 上下文交接 | ✅ 完成 → 本文件 |
-| Step 4 实现 | ⛔ **未开始,等待用户显式批准** |
+| Step 4 实现 | 🚧 **进行中**:backlog #1–8 完成,#9–14 待做 |
 
-仓库当前为空(无 `package.json`、无 `src/`),仅有 `AGENTS.md` 与 `docs/`。
+**已可用**:SQLite 后端全链路(KVDB → Table → CRUD/批量/prefix/JSON 查询/排序分页/TTL/索引)
++ 独立 Cache(memory 分层 + wrap SWR)。**78 个测试全绿**,构建产出 ESM+CJS+d.ts。
+
+仓库结构见 `docs/ARCHITECTURE.md` 模块树;实际已落地 `src/{core,drivers/sqlite,query,cache}`、
+`test/{unit,compliance}`。
 
 ---
 
@@ -48,20 +63,26 @@
 
 > 遵循"增量可构建":每步跑通后再进下一步,先 commit。
 
-1. **工程脚手架**:`package.json` / `tsconfig.json`(不开 experimentalDecorators) / tsup / vitest / eslint / prettier。产出空的 `src/index.ts`。
-2. **契约层**:`drivers/types.ts`、`cache/types.ts`(KVStore)、`query/ast.ts`、`plugins/types.ts`。只有类型,无逻辑。
-3. **serializer + key**:`core/serializer.ts`(canonical JSON,处理循环引用/undefined)、`core/key.ts`(prefix/namespace)。配单元测试。
-4. **Cache 子系统**:`cache/stores/memory-store.ts`(lru-cache)→ `cache/cache.ts`(分层 + wrap + SWR)。可独立交付与测试。
-5. **SQLite Driver**(第一个后端,最简):`drivers/sqlite/*`,实现 KVStore + getByPrefix。
-6. **查询编译器**:`query/parser.ts` + `query/compiler.ts` + SQLite visitor。先支持 cmp/逻辑/exists。
-7. **合规测试套件**:`test/compliance/*`,先让 SQLite 全绿。
-8. **core/kvdb.ts + core/table.ts**:把上面拼成对外 API。端到端示例跑通。
-9. **PostgreSQL Driver + visitor** → 跑合规套件。
-10. **MongoDB Driver + visitor** → 跑合规套件。
-11. **sqlite-memory / sqlite-file 缓存后端**。
-12. **装饰器**:`decorators/*`(TC39),委托 cache.wrap。
-13. **插件/钩子运行时**:`plugins/runtime.ts`。
-14. **TTL 后台清理 + 自动索引**(性能收尾)。
+1. ✅ **工程脚手架**:`package.json` / `tsconfig.json`(未开 experimentalDecorators)/ tsup / vitest。
+2. ✅ **契约层**:`drivers/types.ts`、`cache/types.ts`、`query/ast.ts`、`plugins/types.ts`、`core/errors.ts`。
+3. ✅ **serializer + key + expiry**:canonical JSON / prefix-namespace / TTL 助手。
+4. ✅ **Cache 子系统**:`cache/stores/memory-store.ts` + `cache/cache.ts`(分层 + wrap + SWR)。
+5. ✅ **查询编译器**:`query/parser.ts` + `query/compiler.ts` + SQLite dialect。
+6. ✅ **SQLite Driver**:`drivers/sqlite/*`(KV/批量/prefix/find/index/raw)。
+7. ✅ **core/kvdb.ts + core/table.ts**:对外 API,端到端跑通。
+8. ✅ **合规测试套件**:`test/compliance/driver-compliance.ts`,SQLite 全绿(20 例)。
+9. ⬜ **PostgreSQL Driver + pg-jsonb dialect** → 跑合规套件(需 docker pg)。
+10. ⬜ **MongoDB Driver + mongo 编译** → 跑合规套件(需 docker mongo)。
+11. ⬜ **sqlite-memory / sqlite-file 缓存后端**:实现 KVStore,接入 Cache 的 `resolveStore`("sqlite-memory"/"sqlite")。
+12. ⬜ **装饰器**:`decorators/*`(TC39 标准装饰器),委托 `cache.wrap()`;稳定 key 已有 `stableStringify`。
+13. ⬜ **插件/钩子运行时**:`plugins/runtime.ts`,在 Table 写读查路径触发 Hook。
+14. ⬜ **TTL 后台清理 + 自动索引**(性能收尾)。
+
+### 已知 v1 简化(实现时记录,后续完善)
+- **Query Cache 未接入**:`Table.find` 暂不走缓存(写失效较复杂),仅点读走缓存。后续加 `cacheQueries` 开关 + TTL。
+- **`Table.clear()` 不清共享 cache**:Cache 无按前缀清空能力;依赖缓存的场景建议每表独立 cache。后续给 Cache 加 `deleteByPrefix`。
+- **`$elemMatch`** 在 SQL 后端 v1 抛 `KvdbUnsupportedError`(Mongo 后端可原生支持)。
+- **标量比较**:`find` 的比较值限标量;对象/数组比较未支持。
 
 ---
 
