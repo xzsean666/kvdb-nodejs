@@ -20,8 +20,13 @@ export interface SqlFragment {
  * everything else (boolean structure, IN lists, presence) is composed here.
  */
 export interface SqlDialect {
-  /** SQL expression returning the typed scalar stored at `path`. */
-  scalarAt(path: FieldPath): string;
+  /**
+   * SQL expression returning the scalar stored at `path`. `valueHint` is the
+   * value this scalar will be compared against (when known): engines that
+   * return JSON text (Postgres) use it to pick a numeric/boolean/text cast.
+   * Engines that already return typed scalars (SQLite) ignore it.
+   */
+  scalarAt(path: FieldPath, valueHint?: JsonValue): string;
   /** SQL boolean expression that is true when `path` exists in the document. */
   pathExists(path: FieldPath): string;
   /** Render the placeholder for the param at zero-based `position`. */
@@ -87,8 +92,6 @@ function compileCompare(
   dialect: SqlDialect,
   params: unknown[],
 ): string {
-  const left = dialect.scalarAt(path);
-
   if (op === "$in" || op === "$nin") {
     if (!Array.isArray(value)) {
       throw new KvdbQueryError(`${op} expects an array at "${path.source}"`);
@@ -97,13 +100,16 @@ function compileCompare(
       // $in [] matches nothing; $nin [] matches everything.
       return op === "$in" ? "1=0" : "1=1";
     }
+    const left = dialect.scalarAt(path, value[0]);
     const placeholders = value.map((item) => bind(dialect, params, item)).join(", ");
     return op === "$in" ? `${left} IN (${placeholders})` : `${left} NOT IN (${placeholders})`;
   }
 
+  const left = dialect.scalarAt(path, value);
+
   if (op === "$ne") {
     // Mongo $ne also matches when the field is absent/null.
-    return `(${dialect.scalarAt(path)} IS NULL OR ${left} <> ${bind(dialect, params, value)})`;
+    return `(${left} IS NULL OR ${left} <> ${bind(dialect, params, value)})`;
   }
 
   const sqlOperator = { $eq: "=", $gt: ">", $gte: ">=", $lt: "<", $lte: "<=" }[op];

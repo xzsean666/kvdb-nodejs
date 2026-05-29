@@ -82,7 +82,7 @@ describe("KVDB end-to-end (SQLite)", () => {
     expect(await t.get("k")).toBeUndefined();
   });
 
-  it("throws a clear error for unimplemented drivers", () => {
-    expect(() => new KVDB({ driver: "postgresql", url: "x" })).toThrow(/PostgreSQL/);
+  it("requires a url for the PostgreSQL driver", () => {
+    expect(() => new KVDB({ driver: "postgresql" })).toThrow(/url/);
   });
 });

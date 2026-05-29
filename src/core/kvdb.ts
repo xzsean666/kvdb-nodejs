@@ -10,6 +10,7 @@
 
 import type { Driver, DriverFactory } from "../drivers/types.js";
 import { SqliteDriverFactory } from "../drivers/sqlite/sqlite-driver.js";
+import { PostgresDriverFactory } from "../drivers/postgres/postgres-driver.js";
 import { Cache } from "../cache/cache.js";
 import type { CacheOptions } from "../cache/cache.js";
 import { Table } from "./table.js";
@@ -97,9 +98,10 @@ function createDriverFactory(options: KVDBOptions): DriverFactory {
     case "sqlite":
       return new SqliteDriverFactory({ url: options.url, table: options.table });
     case "postgresql":
-      throw new KvdbConfigError(
-        "The PostgreSQL driver is not implemented yet (see docs/nextsession.md backlog #9).",
-      );
+      if (options.url === undefined) {
+        throw new KvdbConfigError("The PostgreSQL driver requires a connection `url`.");
+      }
+      return new PostgresDriverFactory({ url: options.url, table: options.table });
     case "mongodb":
       throw new KvdbConfigError(
         "The MongoDB driver is not implemented yet (see docs/nextsession.md backlog #10).",

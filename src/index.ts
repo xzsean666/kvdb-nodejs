@@ -21,6 +21,8 @@ export {
   SqliteDriverFactory,
 } from "./drivers/sqlite/sqlite-driver.js";
 export type { SqliteDriverOptions } from "./drivers/sqlite/sqlite-driver.js";
+export { PostgresDriverFactory } from "./drivers/postgres/postgres-driver.js";
+export type { PostgresDriverOptions } from "./drivers/postgres/postgres-driver.js";
 
 // Query AST (for advanced/custom backends).
 export type {

@@ -14,6 +14,8 @@ export class SqliteDialect implements SqlDialect {
   constructor(private readonly column: string = "value") {}
 
   scalarAt(path: FieldPath): string {
+    // SQLite's json_extract already returns a typed scalar, so the comparison
+    // value hint is unnecessary here.
     return `json_extract(${this.column}, '${jsonPath(path)}')`;
   }
 
