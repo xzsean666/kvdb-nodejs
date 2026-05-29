@@ -23,6 +23,8 @@ export {
 export type { SqliteDriverOptions } from "./drivers/sqlite/sqlite-driver.js";
 export { PostgresDriverFactory } from "./drivers/postgres/postgres-driver.js";
 export type { PostgresDriverOptions } from "./drivers/postgres/postgres-driver.js";
+export { MongoDriverFactory } from "./drivers/mongodb/mongodb-driver.js";
+export type { MongoDriverOptions } from "./drivers/mongodb/mongodb-driver.js";
 
 // Query AST (for advanced/custom backends).
 export type {
