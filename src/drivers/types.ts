@@ -56,6 +56,9 @@ export interface Driver extends KVStore {
   /** Ensure an index exists for a JSON path (expression/GIN index). No-op allowed. */
   ensureIndex(jsonPath: string): MaybePromise<void>;
 
+  /** Delete all currently-expired entries; returns how many were removed. */
+  purgeExpired(): MaybePromise<number>;
+
   /** Native handle escape hatch (better-sqlite3 Database, pg Pool, Mongo Db). */
   raw(): unknown;
 

@@ -26,6 +26,9 @@ export type { PostgresDriverOptions } from "./drivers/postgres/postgres-driver.j
 export { MongoDriverFactory } from "./drivers/mongodb/mongodb-driver.js";
 export type { MongoDriverOptions } from "./drivers/mongodb/mongodb-driver.js";
 
+// Auto-index manager (used internally; exported for custom integrations).
+export { AutoIndexManager } from "./core/auto-index.js";
+
 // Query AST (for advanced/custom backends).
 export type {
   QueryNode,

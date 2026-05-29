@@ -17,6 +17,7 @@ import type { CacheOptions } from "../cache/cache.js";
 import { Table } from "./table.js";
 import { HookRuntime } from "../plugins/runtime.js";
 import type { Plugin } from "../plugins/types.js";
+import { AutoIndexManager } from "./auto-index.js";
 import type { JsonValue } from "../types/json.js";
 import { KvdbConfigError } from "./errors.js";
 
@@ -35,6 +36,16 @@ export interface KVDBOptions {
   cache?: CacheOptions | Cache;
   /** Plugins registered at construction; their hooks fire on every Table op. */
   plugins?: Plugin[];
+  /**
+   * Auto-create an index for a JSON path once it has been queried `threshold`
+   * times. OFF by default (implicit DDL is opt-in). `true` uses a threshold of 25.
+   */
+  autoIndex?: boolean | { threshold: number };
+  /**
+   * If set, periodically delete expired entries (ms). The timer is unref'd so it
+   * never keeps the process alive, and is cleared on close().
+   */
+  ttlCleanupIntervalMs?: number;
 }
 
 export interface TableOptions {
@@ -47,7 +58,10 @@ export class KVDB {
   private readonly tablePrefix: string;
   private readonly cache: Cache | undefined;
   private readonly hooks: HookRuntime;
+  private readonly autoIndex: AutoIndexManager | undefined;
+  private readonly ttlCleanupIntervalMs: number | undefined;
   private driverPromise: Promise<Driver> | undefined;
+  private cleanupTimer: ReturnType<typeof setInterval> | undefined;
 
   constructor(options: KVDBOptions) {
     this.factory = createDriverFactory(options);
@@ -55,6 +69,8 @@ export class KVDB {
     this.cache = options.cache ? toCache(options.cache) : undefined;
     this.hooks = new HookRuntime();
     for (const plugin of options.plugins ?? []) this.hooks.register(plugin);
+    this.autoIndex = resolveAutoIndex(options.autoIndex);
+    this.ttlCleanupIntervalMs = options.ttlCleanupIntervalMs;
   }
 
   /** Create a namespaced Table. Values are typed via the `Value` parameter. */
@@ -65,7 +81,13 @@ export class KVDB {
       scope: { tablePrefix: this.tablePrefix, namespace },
       cache,
       hooks: this.hooks,
+      autoIndex: this.autoIndex,
     });
+  }
+
+  /** Delete all currently-expired entries across the backend; returns the count. */
+  async purgeExpired(): Promise<number> {
+    return (await this.getDriver()).purgeExpired();
   }
 
   /** Force the connection to open now (otherwise it opens on first use). */
@@ -79,6 +101,10 @@ export class KVDB {
   }
 
   async close(): Promise<void> {
+    if (this.cleanupTimer !== undefined) {
+      clearInterval(this.cleanupTimer);
+      this.cleanupTimer = undefined;
+    }
     if (this.driverPromise === undefined) return;
     const driver = await this.driverPromise;
     this.driverPromise = undefined;
@@ -89,8 +115,18 @@ export class KVDB {
   private getDriver(): Promise<Driver> {
     if (this.driverPromise === undefined) {
       this.driverPromise = this.factory.connect();
+      if (this.ttlCleanupIntervalMs !== undefined) this.startCleanupTimer();
     }
     return this.driverPromise;
+  }
+
+  private startCleanupTimer(): void {
+    this.cleanupTimer = setInterval(() => {
+      // A failed periodic purge must not crash the process; it retries next tick.
+      void this.purgeExpired().catch(() => {});
+    }, this.ttlCleanupIntervalMs);
+    // Don't let the cleanup timer keep the event loop (and process) alive.
+    this.cleanupTimer.unref?.();
   }
 }
 
@@ -117,4 +153,12 @@ function createDriverFactory(options: KVDBOptions): DriverFactory {
 
 function toCache(value: CacheOptions | Cache): Cache {
   return value instanceof Cache ? value : new Cache(value);
+}
+
+function resolveAutoIndex(
+  option: boolean | { threshold: number } | undefined,
+): AutoIndexManager | undefined {
+  if (!option) return undefined;
+  const threshold = option === true ? 25 : option.threshold;
+  return new AutoIndexManager(threshold);
 }

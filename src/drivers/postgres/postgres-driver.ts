@@ -227,6 +227,14 @@ class PostgresDriver implements Driver {
     await this.pool.query(`CREATE INDEX IF NOT EXISTS ${indexName} ON ${this.table} ((${expression}))`);
   }
 
+  async purgeExpired(): Promise<number> {
+    const result = await this.pool.query(
+      `DELETE FROM ${this.table} WHERE expires_at IS NOT NULL AND expires_at <= $1`,
+      [Date.now()],
+    );
+    return result.rowCount ?? 0;
+  }
+
   raw(): Pool {
     return this.pool;
   }

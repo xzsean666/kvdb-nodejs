@@ -15,7 +15,9 @@ import { serialize, deserialize } from "./serializer.js";
 import { toPhysicalKey, toUserKey, toPhysicalPrefix, namespacePrefix } from "./key.js";
 import type { KeyScope } from "./key.js";
 import { parseWhere, parseFindOptions } from "../query/parser.js";
+import { collectFieldPaths } from "../query/paths.js";
 import type { HookRuntime } from "../plugins/runtime.js";
+import type { AutoIndexManager } from "./auto-index.js";
 
 /** User-facing query document for `find` (parsed into the AST internally). */
 export interface FindQuery {
@@ -37,6 +39,8 @@ export interface TableDependencies {
   cache?: Cache;
   /** Hook runtime (no-op when no plugins are registered). */
   hooks: HookRuntime;
+  /** Optional auto-index manager (opt-in via KVDBOptions.autoIndex). */
+  autoIndex?: AutoIndexManager;
 }
 
 export class Table<Value = JsonValue> {
@@ -180,6 +184,13 @@ export class Table<Value = JsonValue> {
     });
     const entries = await driver.find(parsed.where, parsed.options);
     await this.deps.hooks.run("afterQuery", parsed);
+
+    if (this.deps.autoIndex) {
+      const paths = collectFieldPaths(parsed.where, parsed.options?.sort);
+      for (const path of this.deps.autoIndex.record(paths)) {
+        await driver.ensureIndex(path);
+      }
+    }
     return entries.map((entry) => ({
       key: toUserKey(this.deps.scope, entry.key),
       value: deserialize<Value>(entry.value),

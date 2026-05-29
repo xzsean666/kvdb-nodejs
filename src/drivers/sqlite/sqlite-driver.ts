@@ -228,6 +228,12 @@ class SqliteDriver implements Driver {
     );
   }
 
+  purgeExpired(): number {
+    return this.database
+      .prepare(`DELETE FROM ${this.table} WHERE expires_at IS NOT NULL AND expires_at <= ?`)
+      .run(Date.now()).changes;
+  }
+
   raw(): BetterSqlite3.Database {
     return this.database;
   }

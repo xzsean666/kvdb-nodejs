@@ -196,6 +196,13 @@ class MongoDriver implements Driver {
     await this.collection.createIndex({ [`doc.${jsonPath}`]: 1 });
   }
 
+  async purgeExpired(): Promise<number> {
+    const result = await this.collection.deleteMany({
+      expiresAt: { $ne: null, $lte: Date.now() },
+    });
+    return result.deletedCount;
+  }
+
   raw(): Db {
     return this.db;
   }

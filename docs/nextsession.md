@@ -23,13 +23,24 @@
 | Step 1 架构设计 | ✅ 完成 → `docs/ARCHITECTURE.md` |
 | Step 2 文档(SPEC/BUILD) | ✅ 完成 → `docs/SPEC.md`, `docs/BUILD.md` |
 | Step 3 上下文交接 | ✅ 完成 → 本文件 |
-| Step 4 实现 | 🚧 **进行中**:backlog #1–8 完成,#9–14 待做 |
+| Step 4 实现 | ✅ **全部 14 项完成**(SQLite 已验证;PG/Mongo 待真实 DB 验证) |
 
-**已可用**:SQLite 后端全链路(KVDB → Table → CRUD/批量/prefix/JSON 查询/排序分页/TTL/索引)
-+ 独立 Cache(memory 分层 + wrap SWR)。**78 个测试全绿**,构建产出 ESM+CJS+d.ts。
+**已可用**:三后端全链路(KVDB → Table → CRUD/批量/prefix/JSON 查询/排序分页/TTL/索引)
++ 独立 Cache(memory / sqlite-memory / sqlite-file 分层 + wrap SWR)+ 装饰器缓存(TC39)
++ 插件钩子 + 自动索引(opt-in)+ TTL 后台清理。**96 个单测全绿**,构建产出 ESM+CJS+d.ts。
 
-仓库结构见 `docs/ARCHITECTURE.md` 模块树;实际已落地 `src/{core,drivers/sqlite,query,cache}`、
-`test/{unit,compliance}`。
+仓库结构见 `docs/ARCHITECTURE.md` 模块树;已落地 `src/{core,drivers/{sqlite,postgres,mongodb},query,cache,decorators,plugins,types}`、`test/{unit,compliance}`。
+
+### ⚠️ 验证状态(诚实记录)
+- **SQLite**:单测 + 20 例合规套件全绿(`:memory:`,真实 better-sqlite3)。
+- **PostgreSQL / MongoDB**:代码完成且通过类型检查,合规套件已接好,但**本机无 Docker 权限,未对真实 DB 跑过**。验证命令:
+  ```bash
+  # Postgres(需可用 docker / 远程库)
+  KVDB_TEST_PG_URL=postgres://postgres:dev@localhost:5432/postgres pnpm test:compliance
+  # MongoDB
+  KVDB_TEST_MONGO_URL=mongodb://localhost:27017/kvdb_test pnpm test:compliance
+  ```
+  跑通后请把结果回填到本节。
 
 ---
 
@@ -71,12 +82,19 @@
 6. ✅ **SQLite Driver**:`drivers/sqlite/*`(KV/批量/prefix/find/index/raw)。
 7. ✅ **core/kvdb.ts + core/table.ts**:对外 API,端到端跑通。
 8. ✅ **合规测试套件**:`test/compliance/driver-compliance.ts`,SQLite 全绿(20 例)。
-9. ⬜ **PostgreSQL Driver + pg-jsonb dialect** → 跑合规套件(需 docker pg)。
-10. ⬜ **MongoDB Driver + mongo 编译** → 跑合规套件(需 docker mongo)。
-11. ⬜ **sqlite-memory / sqlite-file 缓存后端**:实现 KVStore,接入 Cache 的 `resolveStore`("sqlite-memory"/"sqlite")。
-12. ⬜ **装饰器**:`decorators/*`(TC39 标准装饰器),委托 `cache.wrap()`;稳定 key 已有 `stableStringify`。
-13. ⬜ **插件/钩子运行时**:`plugins/runtime.ts`,在 Table 写读查路径触发 Hook。
-14. ⬜ **TTL 后台清理 + 自动索引**(性能收尾)。
+9. ✅ **PostgreSQL Driver + pg-jsonb dialect**(复用 SQL 编译器)。合规套件已接,待真实库验证。
+10. ✅ **MongoDB Driver + mongo 编译**。合规套件已接,待真实库验证。
+11. ✅ **sqlite-memory / sqlite-file 缓存后端**:`SqliteCacheStore`,已接入 Cache `resolveStore`。
+12. ✅ **装饰器**:`@Cacheable`/`@CacheClear`(TC39),委托 `cache.wrap()`。
+13. ✅ **插件/钩子运行时**:`HookRuntime`,已接入 Table 读写查路径 + `KVDB({ plugins })`。
+14. ✅ **TTL 后台清理 + 自动索引**:`KVDB.purgeExpired()` / `ttlCleanupIntervalMs`(unref 定时器)/ `autoIndex`(opt-in)。
+
+### 后续可做(非阻塞)
+- 在真实 PG / Mongo 上跑合规套件并回填结果(见上方验证状态)。
+- Query Cache 开关(目前 find 不走缓存)。
+- Cache `deleteByPrefix`,让 `Table.clear()` 能清对应缓存。
+- typed JSON path / `$elemMatch` 在 SQL 后端的支持。
+- eslint/prettier 配置与 CI。
 
 ### 已知 v1 简化(实现时记录,后续完善)
 - **Query Cache 未接入**:`Table.find` 暂不走缓存(写失效较复杂),仅点读走缓存。后续加 `cacheQueries` 开关 + TTL。
