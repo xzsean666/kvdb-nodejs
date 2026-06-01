@@ -38,6 +38,7 @@ pnpm examples                               # run them all, each in its own proc
 | `12-plugins-hooks.ts` | plugins and lifecycle hooks (audit/rewrite) |
 | `13-multiple-databases.ts` | multiple independent KVDB instances |
 | `14-error-handling.ts` | typed errors (`KvdbConfigError`, `KvdbQueryError`, …) |
+| `15-update.ts` | partial `update` — shallow-merge / function patch, TTL preserved |
 
 ## PostgreSQL examples
 

@@ -12,6 +12,7 @@ import type { Driver } from "../drivers/types.js";
 import type { Cache } from "../cache/cache.js";
 import type { JsonValue } from "../types/json.js";
 import { serialize, deserialize } from "./serializer.js";
+import { KvdbError } from "./errors.js";
 import { toPhysicalKey, toUserKey, toPhysicalPrefix, namespacePrefix } from "./key.js";
 import type { KeyScope } from "./key.js";
 import { parseWhere, parseFindOptions } from "../query/parser.js";
@@ -30,6 +31,13 @@ export interface FindQuery {
 export interface SetOptions {
   ttlMs?: number;
 }
+
+/**
+ * The change applied by {@link Table.update}. Either a partial object that is
+ * shallow-merged into the stored value, or a function that receives the current
+ * value and returns the next one (for nested or computed edits).
+ */
+export type UpdatePatch<Value> = Partial<Value> | ((current: Value) => Value);
 
 export interface TableDependencies {
   /** Resolve the lazily-connected driver. */
@@ -67,6 +75,50 @@ export class Table<Value = JsonValue> {
     await driver.set(physicalKey, serialize(before.value), before.ttlMs);
     if (this.deps.cache) await this.deps.cache.set(physicalKey, before.value, before.ttlMs);
     await this.deps.hooks.run("afterWrite", before);
+  }
+
+  /**
+   * Partially update an existing value (read-modify-write).
+   *
+   * - **Object patch** (`{ age: 21 }`): shallow-merges its top-level fields into
+   *   the stored object (`{ ...current, ...patch }`). Set a field to `undefined`
+   *   in the patch to drop it (canonical JSON semantics, see core/serializer.ts).
+   * - **Function patch** (`(current) => next`): receives the current value and
+   *   returns the next one — use this for nested or computed edits.
+   *
+   * The existing TTL is preserved unless `options.ttlMs` overrides it. Throws
+   * `KvdbError("QUERY")` if the key does not exist (use {@link set} to create).
+   * Returns the value that was written.
+   */
+  async update(
+    key: string,
+    patch: UpdatePatch<Value>,
+    options: SetOptions = {},
+  ): Promise<Value> {
+    const driver = await this.deps.getDriver();
+    const physicalKey = toPhysicalKey(this.deps.scope, key);
+    const entry = await driver.get(physicalKey);
+    if (entry === undefined) {
+      throw new KvdbError(
+        "QUERY",
+        `Cannot update key "${key}" in namespace "${this.namespace}": it does not exist`,
+      );
+    }
+    const current = deserialize<Value>(entry.value);
+    const next = applyPatch(current, patch);
+    const ttlMs = options.ttlMs ?? ttlFromExpiry(entry.expiresAt);
+
+    const before = await this.deps.hooks.run("beforeWrite", {
+      namespace: this.namespace,
+      key,
+      value: next as JsonValue,
+      ttlMs,
+    });
+    const writeKey = toPhysicalKey(this.deps.scope, before.key);
+    await driver.set(writeKey, serialize(before.value), before.ttlMs);
+    if (this.deps.cache) await this.deps.cache.set(writeKey, before.value, before.ttlMs);
+    await this.deps.hooks.run("afterWrite", before);
+    return before.value as Value;
   }
 
   async get(key: string): Promise<Value | undefined> {
@@ -205,4 +257,30 @@ export class Table<Value = JsonValue> {
     const driver = await this.deps.getDriver();
     await driver.ensureIndex(jsonPath);
   }
+}
+
+/** Apply an {@link UpdatePatch} to the current value (see {@link Table.update}). */
+function applyPatch<Value>(current: Value, patch: UpdatePatch<Value>): Value {
+  if (typeof patch === "function") {
+    return (patch as (current: Value) => Value)(current);
+  }
+  if (!isPlainObject(current) || !isPlainObject(patch)) {
+    throw new KvdbError(
+      "QUERY",
+      "An object patch requires both the stored value and the patch to be plain " +
+        "objects; use the function form `(current) => next` for other shapes",
+    );
+  }
+  return { ...current, ...patch } as Value;
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** Remaining TTL (relative ms) from an absolute expiry, or `undefined` if none. */
+function ttlFromExpiry(expiresAt?: number): number | undefined {
+  if (expiresAt === undefined) return undefined;
+  const remaining = expiresAt - Date.now();
+  return remaining > 0 ? remaining : undefined;
 }

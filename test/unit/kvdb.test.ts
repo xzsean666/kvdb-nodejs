@@ -27,6 +27,55 @@ describe("KVDB end-to-end (SQLite)", () => {
     expect(await users.get("u1")).toBeUndefined();
   });
 
+  it("partially updates an existing value", async () => {
+    db = new KVDB({ driver: "sqlite", url: ":memory:" });
+    const users = db.table<User>("users");
+    await users.set("u1", { name: "Ann", profile: { age: 20 }, status: "active" });
+
+    // Object patch shallow-merges top-level fields and returns the new value.
+    const updated = await users.update("u1", { status: "inactive" });
+    expect(updated).toEqual({ name: "Ann", profile: { age: 20 }, status: "inactive" });
+    expect(await users.get("u1")).toEqual({
+      name: "Ann",
+      profile: { age: 20 },
+      status: "inactive",
+    });
+
+    // Function patch handles nested/computed edits.
+    await users.update("u1", (v) => ({ ...v, profile: { age: v.profile.age + 1 } }));
+    expect(await users.get("u1")).toEqual({
+      name: "Ann",
+      profile: { age: 21 },
+      status: "inactive",
+    });
+  });
+
+  it("drops a field when an update sets it to undefined", async () => {
+    db = new KVDB({ driver: "sqlite", url: ":memory:" });
+    const t = db.table<{ a: number; b?: number }>("obj");
+    await t.set("k", { a: 1, b: 2 });
+    await t.update("k", { b: undefined });
+    expect(await t.get("k")).toEqual({ a: 1 });
+  });
+
+  it("throws when updating a missing key", async () => {
+    db = new KVDB({ driver: "sqlite", url: ":memory:" });
+    const t = db.table<{ a: number }>("obj");
+    await expect(t.update("nope", { a: 1 })).rejects.toThrow(/does not exist/);
+  });
+
+  it("preserves the existing TTL across an update", async () => {
+    db = new KVDB({ driver: "sqlite", url: ":memory:" });
+    const t = db.table<{ n: number }>("obj");
+    await t.set("k", { n: 1 }, { ttlMs: 60_000 });
+    await t.update("k", { n: 2 });
+    // Still present (TTL preserved, not cleared).
+    expect(await t.get("k")).toEqual({ n: 2 });
+    // An explicit, already-expired TTL override takes effect.
+    await t.update("k", { n: 3 }, { ttlMs: -1 });
+    expect(await t.get("k")).toBeUndefined();
+  });
+
   it("isolates namespaces", async () => {
     db = new KVDB({ driver: "sqlite", url: ":memory:" });
     const a = db.table("a");
