@@ -2,10 +2,13 @@
 //
 // Run:  pnpm example examples/15-update.ts
 //
-// `update` is read-modify-write: it reads the current value, applies your patch,
-// and writes it back. Pass an object to shallow-merge top-level fields, or a
-// function for nested/computed edits. The existing TTL is preserved unless you
-// override it, and updating a missing key throws (use `set` to create).
+// `update` is an ATOMIC read-modify-write: the merge runs inside the driver's
+// transaction with the row locked (PG `SELECT … FOR UPDATE`, SQLite `BEGIN
+// IMMEDIATE`, Mongo compare-and-swap), so concurrent updates to the same key
+// serialize instead of clobbering each other — identical behaviour on every
+// backend. Pass an object to shallow-merge top-level fields, or a function for
+// nested/computed edits. The existing TTL is preserved unless you override it,
+// and updating a missing key throws (use `set` to create).
 
 import { KVDB, KvdbError } from "kvdb-sdk";
 

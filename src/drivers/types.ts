@@ -6,10 +6,26 @@
 // (that is how MongoDB opts out of pooling/transactions).
 
 import type { MaybePromise } from "../types/json.js";
-import type { KVStore, KVEntry } from "../cache/types.js";
+import type { KVStore, KVEntry, RawEntry } from "../cache/types.js";
 import type { QueryNode, FindOptions } from "../query/ast.js";
 
 export type ProviderName = "sqlite" | "postgres" | "mongodb";
+
+/** The value+TTL an atomic update writes back (see {@link Driver.update}). */
+export interface UpdateResult {
+  /** Canonical JSON text to store. */
+  value: string;
+  /** Relative TTL in ms, or undefined for no expiry. */
+  ttlMs?: number;
+}
+
+/**
+ * Computes the new entry from the current one during an atomic update. Receives
+ * the live entry (undefined if the key is missing or expired) and returns what
+ * to write. It is synchronous and pure (the SDK's merge + serialize), and may
+ * throw to abort the update — the driver leaves the row untouched on throw.
+ */
+export type UpdateMutator = (current: RawEntry | undefined) => UpdateResult;
 
 /**
  * What a backend can do. The core reads these to decide whether to delegate to
@@ -60,6 +76,16 @@ export interface Driver extends KVStore {
 
   /** Ensure an index exists for a JSON path (expression/GIN index). No-op allowed. */
   ensureIndex(jsonPath: string): MaybePromise<void>;
+
+  /**
+   * Atomically read-modify-write one key: read the current entry, hand it to
+   * `mutate`, and store what it returns — as a single unit with the row locked,
+   * so concurrent updates to the same key serialize instead of clobbering each
+   * other. `mutate` may throw to abort (e.g. on a missing key), leaving the row
+   * unchanged. Optional: the core falls back to a (non-atomic) get+set when a
+   * driver does not implement it.
+   */
+  update?(key: string, mutate: UpdateMutator): MaybePromise<void>;
 
   /** Delete all currently-expired entries; returns how many were removed. */
   purgeExpired(): MaybePromise<number>;

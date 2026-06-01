@@ -10,7 +10,13 @@
 // mongodb is an optional peer dependency, imported lazily in connect().
 
 import type { MongoClient, Db, Collection } from "mongodb";
-import type { Driver, DriverFactory, DriverCapabilities, ProviderName } from "../types.js";
+import type {
+  Driver,
+  DriverFactory,
+  DriverCapabilities,
+  ProviderName,
+  UpdateMutator,
+} from "../types.js";
 import type { KVEntry, RawEntry } from "../../cache/types.js";
 import type { QueryNode, FindOptions } from "../../query/ast.js";
 import { compileMongoFilter, compileMongoSort } from "./compiler.js";
@@ -19,6 +25,9 @@ import { deserialize } from "../../core/serializer.js";
 import { KvdbConfigError, KvdbConnectionError } from "../../core/errors.js";
 
 const PROVIDER: ProviderName = "mongodb";
+
+/** Retry budget for the optimistic-concurrency update loop before giving up. */
+const MAX_UPDATE_ATTEMPTS = 256;
 
 const CAPABILITIES: DriverCapabilities = {
   nativeTtl: false,
@@ -119,6 +128,45 @@ class MongoDriver implements Driver {
 
   async delete(key: string): Promise<boolean> {
     return (await this.collection.deleteOne({ _id: key })).deletedCount > 0;
+  }
+
+  async update(key: string, mutate: UpdateMutator): Promise<void> {
+    // No multi-statement lock on standalone Mongo, so use optimistic
+    // concurrency: read, compute, then write only if the stored value is still
+    // what we read (compare-and-swap on `value`). A concurrent write changes
+    // `value`, the CAS misses, and we retry against the new value — no lost
+    // update. A brand-new/expired key has no prior value to guard, so it upserts
+    // (last-write-wins for the rare concurrent-create case).
+    for (let attempt = 0; attempt < MAX_UPDATE_ATTEMPTS; attempt++) {
+      const now = Date.now();
+      const doc = await this.collection.findOne({ _id: key });
+      let current: RawEntry | undefined;
+      if (doc !== null) {
+        const expiresAt = doc.expiresAt ?? undefined;
+        if (expiresAt === undefined || expiresAt > now) {
+          current = { value: doc.value, expiresAt };
+        }
+      }
+      const next = mutate(current);
+      const set = {
+        value: next.value,
+        doc: deserialize(next.value),
+        expiresAt: expiresAtFromTtl(next.ttlMs, now) ?? null,
+      };
+      if (current === undefined) {
+        await this.collection.updateOne({ _id: key }, { $set: set }, { upsert: true });
+        return;
+      }
+      const result = await this.collection.updateOne(
+        { _id: key, value: current.value },
+        { $set: set },
+      );
+      if (result.matchedCount === 1) return;
+      // Lost the race: the row changed under us. Loop and merge against the new value.
+    }
+    throw new KvdbConnectionError(
+      `update("${key}") exceeded ${MAX_UPDATE_ATTEMPTS} attempts under write contention`,
+    );
   }
 
   async has(key: string): Promise<boolean> {

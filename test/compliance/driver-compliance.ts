@@ -64,6 +64,58 @@ export function describeDriverCompliance(label: string, makeDriver: MakeDriver):
       });
     });
 
+    describe("atomic update", () => {
+      const deser = (text: string) => JSON.parse(text) as Record<string, unknown>;
+
+      it("read-modify-writes through the mutate callback", async () => {
+        await put("a", { n: 1, keep: true });
+        await driver.update!("a", (current) => {
+          const v = deser(current!.value);
+          return { value: serialize({ ...v, n: (v.n as number) + 1 }) };
+        });
+        // Canonical text is preserved (keys sorted) — identical on every backend.
+        expect((await driver.get("a"))?.value).toBe(serialize({ keep: true, n: 2 }));
+      });
+
+      it("hands undefined to the mutator for a missing key and aborts on throw", async () => {
+        let sawMissing = false;
+        // The IIFE turns a synchronous driver's throw (SQLite) and an async
+        // driver's rejection (PG/Mongo) into the same rejected promise.
+        await expect(
+          (async () =>
+            driver.update!("missing", (current) => {
+              sawMissing = current === undefined;
+              throw new Error("no such key");
+            }))(),
+        ).rejects.toThrow("no such key");
+        expect(sawMissing).toBe(true);
+        expect(await driver.get("missing")).toBeUndefined(); // nothing written
+      });
+
+      it("preserves TTL when the mutator echoes it back", async () => {
+        await put("a", { n: 1 }, 60_000);
+        await driver.update!("a", (current) => {
+          const remaining = current!.expiresAt! - Date.now();
+          return { value: serialize({ n: 2 }), ttlMs: remaining };
+        });
+        const row = await driver.get("a");
+        expect(deser(row!.value).n).toBe(2);
+        expect(row!.expiresAt).toBeGreaterThan(Date.now()); // still live
+      });
+
+      it("serializes concurrent updates without lost writes", async () => {
+        await put("counter", { n: 0 });
+        const increment = () =>
+          driver.update!("counter", (current) => {
+            const v = deser(current!.value);
+            return { value: serialize({ n: (v.n as number) + 1 }) };
+          });
+        // 50 concurrent increments must all land — the whole point of atomicity.
+        await Promise.all(Array.from({ length: 50 }, increment));
+        expect(deser((await driver.get("counter"))!.value).n).toBe(50);
+      });
+    });
+
     describe("TTL", () => {
       it("treats expired entries as missing", async () => {
         await put("a", 1, -1);

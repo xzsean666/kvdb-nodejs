@@ -8,8 +8,9 @@
 //   - applies the optional point-read cache.
 // Drivers see only physical keys and canonical JSON — never user-facing shapes.
 
-import type { Driver } from "../drivers/types.js";
+import type { Driver, UpdateResult } from "../drivers/types.js";
 import type { Cache } from "../cache/cache.js";
+import type { RawEntry } from "../cache/types.js";
 import type { JsonValue } from "../types/json.js";
 import { serialize, deserialize } from "./serializer.js";
 import { KvdbError } from "./errors.js";
@@ -78,7 +79,7 @@ export class Table<Value = JsonValue> {
   }
 
   /**
-   * Partially update an existing value (read-modify-write).
+   * Partially update an existing value (atomic read-modify-write).
    *
    * - **Object patch** (`{ age: 21 }`): shallow-merges its top-level fields into
    *   the stored object (`{ ...current, ...patch }`). Set a field to `undefined`
@@ -86,9 +87,15 @@ export class Table<Value = JsonValue> {
    * - **Function patch** (`(current) => next`): receives the current value and
    *   returns the next one — use this for nested or computed edits.
    *
+   * The merge runs *inside the driver's transaction* with the row locked, so
+   * concurrent updates to the same key serialize instead of clobbering each
+   * other (drivers/types.ts `update`). Behaviour is identical on every backend.
+   *
    * The existing TTL is preserved unless `options.ttlMs` overrides it. Throws
    * `KvdbError("QUERY")` if the key does not exist (use {@link set} to create).
-   * Returns the value that was written.
+   * Returns the value that was written. Note: because the merge happens under
+   * the lock (where async hooks cannot run), `update` fires `afterWrite` but not
+   * `beforeWrite` — use {@link set} when a plugin must rewrite the value.
    */
   async update(
     key: string,
@@ -97,28 +104,38 @@ export class Table<Value = JsonValue> {
   ): Promise<Value> {
     const driver = await this.deps.getDriver();
     const physicalKey = toPhysicalKey(this.deps.scope, key);
-    const entry = await driver.get(physicalKey);
-    if (entry === undefined) {
-      throw new KvdbError(
-        "QUERY",
-        `Cannot update key "${key}" in namespace "${this.namespace}": it does not exist`,
-      );
-    }
-    const current = deserialize<Value>(entry.value);
-    const next = applyPatch(current, patch);
-    const ttlMs = options.ttlMs ?? ttlFromExpiry(entry.expiresAt);
 
-    const before = await this.deps.hooks.run("beforeWrite", {
+    let written!: Value;
+    let writtenTtl: number | undefined;
+    // Pure read→merge→serialize, run by the driver under the row lock.
+    const mutate = (current: RawEntry | undefined): UpdateResult => {
+      if (current === undefined) {
+        throw new KvdbError(
+          "QUERY",
+          `Cannot update key "${key}" in namespace "${this.namespace}": it does not exist`,
+        );
+      }
+      written = applyPatch(deserialize<Value>(current.value), patch);
+      writtenTtl = options.ttlMs ?? ttlFromExpiry(current.expiresAt);
+      return { value: serialize(written), ttlMs: writtenTtl };
+    };
+
+    if (driver.update) {
+      await driver.update(physicalKey, mutate);
+    } else {
+      // Non-atomic fallback for custom drivers without a native atomic update.
+      const result = mutate(await driver.get(physicalKey));
+      await driver.set(physicalKey, result.value, result.ttlMs);
+    }
+
+    if (this.deps.cache) await this.deps.cache.set(physicalKey, written, writtenTtl);
+    await this.deps.hooks.run("afterWrite", {
       namespace: this.namespace,
       key,
-      value: next as JsonValue,
-      ttlMs,
+      value: written as JsonValue,
+      ttlMs: writtenTtl,
     });
-    const writeKey = toPhysicalKey(this.deps.scope, before.key);
-    await driver.set(writeKey, serialize(before.value), before.ttlMs);
-    if (this.deps.cache) await this.deps.cache.set(writeKey, before.value, before.ttlMs);
-    await this.deps.hooks.run("afterWrite", before);
-    return before.value as Value;
+    return written;
   }
 
   async get(key: string): Promise<Value | undefined> {

@@ -9,7 +9,13 @@
 // factory's connect(), so installing only the backends you use stays valid.
 
 import type BetterSqlite3 from "better-sqlite3";
-import type { Driver, DriverFactory, DriverCapabilities, ProviderName } from "../types.js";
+import type {
+  Driver,
+  DriverFactory,
+  DriverCapabilities,
+  ProviderName,
+  UpdateMutator,
+} from "../types.js";
 import type { KVEntry, RawEntry } from "../../cache/types.js";
 import type { QueryNode, FindOptions } from "../../query/ast.js";
 import { compileWhere, compileOrderBy } from "../../query/compiler.js";
@@ -139,6 +145,23 @@ class SqliteDriver implements Driver {
 
   delete(key: string): boolean {
     return this.statements.delete.run(key).changes > 0;
+  }
+
+  update(key: string, mutate: UpdateMutator): void {
+    // BEGIN IMMEDIATE takes the write lock up front, so a concurrent updater on
+    // another connection waits rather than reading a stale value (lost update).
+    // better-sqlite3 transactions are synchronous, which is why mutate is sync.
+    const run = this.database.transaction((k: string) => {
+      const result = mutate(this.get(k));
+      const now = Date.now();
+      this.statements.upsert.run({
+        key: k,
+        value: result.value,
+        expiresAt: expiresAtFromTtl(result.ttlMs, now) ?? null,
+        now,
+      });
+    });
+    run.immediate(key);
   }
 
   has(key: string): boolean {

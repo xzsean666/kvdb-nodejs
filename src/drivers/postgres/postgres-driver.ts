@@ -9,7 +9,13 @@
 // optional peer dependency, imported lazily in connect().
 
 import type { Pool } from "pg";
-import type { Driver, DriverFactory, DriverCapabilities, ProviderName } from "../types.js";
+import type {
+  Driver,
+  DriverFactory,
+  DriverCapabilities,
+  ProviderName,
+  UpdateMutator,
+} from "../types.js";
 import type { KVEntry, RawEntry } from "../../cache/types.js";
 import type { QueryNode, FindOptions } from "../../query/ast.js";
 import { compileWhere, compileOrderBy } from "../../query/compiler.js";
@@ -125,6 +131,44 @@ class PostgresDriver implements Driver {
   async delete(key: string): Promise<boolean> {
     const result = await this.pool.query(`DELETE FROM ${this.table} WHERE key = $1`, [key]);
     return (result.rowCount ?? 0) > 0;
+  }
+
+  async update(key: string, mutate: UpdateMutator): Promise<void> {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      // FOR UPDATE locks the row for the txn, so a concurrent updater blocks here
+      // until we COMMIT — they then read our write instead of clobbering it.
+      const result = await client.query<{ value: string; expires_at: string | null }>(
+        `SELECT value, expires_at FROM ${this.table} WHERE key = $1 FOR UPDATE`,
+        [key],
+      );
+      const now = Date.now();
+      let current: RawEntry | undefined;
+      const row = result.rows[0];
+      if (row !== undefined) {
+        const expiresAt = row.expires_at === null ? undefined : Number(row.expires_at);
+        if (expiresAt !== undefined && expiresAt <= now) {
+          await client.query(`DELETE FROM ${this.table} WHERE key = $1`, [key]);
+        } else {
+          current = { value: row.value, expiresAt };
+        }
+      }
+      const next = mutate(current);
+      await client.query(
+        `INSERT INTO ${this.table} (key, value, expires_at, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $4)
+         ON CONFLICT (key) DO UPDATE SET
+           value = excluded.value, expires_at = excluded.expires_at, updated_at = excluded.updated_at`,
+        [key, next.value, expiresAtFromTtl(next.ttlMs, now) ?? null, now],
+      );
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
   async has(key: string): Promise<boolean> {
