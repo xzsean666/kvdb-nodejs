@@ -11,12 +11,6 @@ importers:
       lru-cache:
         specifier: ^11.0.0
         version: 11.5.1
-      mongodb:
-        specifier: '*'
-        version: 7.2.0
-      pg:
-        specifier: '*'
-        version: 8.21.0
     devDependencies:
       '@types/better-sqlite3':
         specifier: ^7.6.11
@@ -30,6 +24,12 @@ importers:
       better-sqlite3:
         specifier: ^11.0.0
         version: 11.10.0
+      mongodb:
+        specifier: ^7.0.0
+        version: 7.2.0
+      pg:
+        specifier: ^8.11.0
+        version: 8.21.0
       tsup:
         specifier: ^8.0.0
         version: 8.5.1(postcss@8.5.15)(tsx@4.22.3)(typescript@5.9.3)
