@@ -78,8 +78,11 @@ export {
   KvdbSerializationError,
   KvdbUnsupportedError,
   KvdbConfigError,
+  KvdbSchemaError,
+  KvdbMigrationError,
 } from "./core/errors.js";
 export type { KvdbErrorCode } from "./core/errors.js";
 
 // Shared value types.
 export type { JsonValue, JsonObject, JsonPrimitive, MaybePromise } from "./types/json.js";
+export type { PhysicalColumnType, ColumnDefinition, ColumnIndexOptions, TableIndexDefinition, TableSchema, PhysicalRecord } from "./core/table-schema.js";

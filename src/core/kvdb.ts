@@ -20,6 +20,7 @@ import type { Plugin } from "../plugins/types.js";
 import { AutoIndexManager } from "./auto-index.js";
 import type { JsonValue } from "../types/json.js";
 import { KvdbConfigError } from "./errors.js";
+import type { TableSchema } from "./table-schema.js";
 
 /** Driver names accepted in config (mirrors docs/SPEC.md and the README). */
 export type KVDBDriverName = "sqlite" | "postgresql" | "mongodb";
@@ -58,6 +59,7 @@ export interface KVDBOptions {
 export interface TableOptions {
   /** Per-table cache; overrides the instance cache for this namespace. */
   cache?: CacheOptions | Cache;
+  schema?: TableSchema;
 }
 
 export class KVDB {
@@ -81,14 +83,16 @@ export class KVDB {
   }
 
   /** Create a namespaced Table. Values are typed via the `Value` parameter. */
-  table<Value = JsonValue>(namespace: string, options: TableOptions = {}): Table<Value> {
+  table<Value = JsonValue, Columns extends Record<string, unknown> = Record<string, unknown>>(namespace: string, options: TableOptions = {}): Table<Value, Columns> {
     const cache = options.cache ? toCache(options.cache) : this.cache;
-    return new Table<Value>({
+    return new Table<Value, Columns>({
       getDriver: () => this.getDriver(),
       scope: { tablePrefix: this.tablePrefix, namespace },
       cache,
       hooks: this.hooks,
       autoIndex: this.autoIndex,
+      schemaName: namespace,
+      schema: options.schema,
     });
   }
 

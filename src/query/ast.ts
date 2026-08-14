@@ -30,6 +30,7 @@ export interface FieldPath {
   segments: PathSegment[];
   /** Original dotted source, kept for error messages and cache keys. */
   source: string;
+  sourceKind?: "value" | "column";
 }
 
 export type QueryNode =

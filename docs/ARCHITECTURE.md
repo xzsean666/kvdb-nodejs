@@ -69,12 +69,15 @@ src/
   core/                    # 用户面对的对象层(不感知具体数据库)
     kvdb.ts                # KVDB 实例:连接、driver 管理、prefix、cache 配置
     table.ts               # Table/Namespace 实例:CRUD + Query 的门面
+    table-schema.ts        # 物理列/索引 schema 类型与运行时校验
+    table-registry.ts      # 逻辑 table 到物理 table/collection 的注册
     serializer.ts          # canonical JSON text 编解码(KD-3)
     key.ts                 # prefix / namespace key 解析(集中在此一层)
     errors.ts              # 错误类型(显式、可判别)
 
   drivers/                 # 富层 Driver 契约 + 各后端实现
     types.ts               # Driver / DriverFactory / Capabilities 契约(KD-1, KD-6)
+    schema-types.ts        # 物理列、完整记录与迁移契约
     sqlite/                # better-sqlite3 实现(+ node:sqlite 版本门控适配)
     postgres/              # pg / jsonb 实现
     mongodb/               # mongodb 原生实现
@@ -177,6 +180,22 @@ Table / Namespace 实例  (业务隔离 / 独立缓存策略)
     ▼
 CRUD / Query  (set/get/delete/find/getByPrefix/...)
 ```
+
+### 4.5 Schema table 生命周期与查询数据流
+
+`db.table(name, { schema })` 只声明配置；首次实际操作时通过 registry 查找逻辑名：
+
+```text
+Table operation
+  → registry: load metadata by logical name
+      ├─ absent + schema → create physical table/collection + indexes
+      ├─ present + matching schema → open existing physical table/collection
+      ├─ present + no schema → recover stored schema
+      └─ conflict → schema/config error (never implicit ALTER)
+  → schema-aware driver CRUD (fixed fields + physical columns + value JSON)
+```
+
+普通 KV namespace 继续使用共享物理存储；schema table 使用独立物理 table/collection，二者不能静默互转。`where.columns` 编译为物理列节点，`where.value` 及旧 dotted path 编译为 `value` JSON 节点；列名只能来自已加载 schema 白名单。
 
 ---
 

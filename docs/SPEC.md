@@ -190,3 +190,41 @@ class UserService {
 - typed JSON path 的编译期校验。
 - 跨 namespace / 跨实例事务。
 - 分布式缓存一致性协议。
+
+## 14. Schema table（真实物理列）
+
+`db.table<Value, Columns>(name, { schema })` 创建按逻辑名管理的 schema table。首次实际操作创建独立物理 table/collection；后续 `db.table(name)` 从 registry 恢复 schema。无 schema 时仍使用普通 KV table；同名普通 KV 与 schema table 冲突不得静默转换。
+
+列类型为 `string | integer | number | boolean | json`，定义支持 `nullable`、`default`、单列 `index`，表级支持联合索引和 `unique`。`key`、`value`、`expires_at`、`created_at`、`updated_at` 为保留字段。非法 identifier、schema 冲突、错类型、缺少 required 列和唯一冲突必须抛可判别错误。
+
+```ts
+const blocks = db.table<BlockValue, BlockColumns>("blocks", {
+  schema: {
+    columns: {
+      blocknumber: { type: "integer", nullable: false, index: true },
+      chainId: { type: "string", nullable: false },
+      timestamp: { type: "integer", nullable: true },
+    },
+    indexes: [{ columns: ["chainId", "blocknumber"] }],
+  },
+});
+
+await blocks.set("tx-1", payload, { columns: { blocknumber: 123, chainId: "eth" } });
+const record = await blocks.getRecord("tx-1"); // { key, columns, value }
+```
+
+`get` 仍只返回 `value`。schema 变更必须调用显式 `db.alterTable(name, migration)`；首期允许新增 nullable/兼容 default 列及增删索引，禁止隐式改类型、重命名或删除列。
+
+## 15. Schema 查询
+
+```ts
+await blocks.find({
+  where: {
+    columns: { blocknumber: { $gte: 10000 }, chainId: "eth" },
+    value: { "receipt.status": 1 },
+  },
+  sort: [{ source: "column", path: "blocknumber", direction: "desc" }],
+});
+```
+
+`where.columns` 查询真实列，`where.value` 查询 value JSON；旧的 dotted value path 保持兼容。columns/value 可混合组合，统一支持既有操作符、排序、分页和 TTL 语义。

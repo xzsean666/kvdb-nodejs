@@ -16,10 +16,12 @@ export class SqliteDialect implements SqlDialect {
   scalarAt(path: FieldPath): string {
     // SQLite's json_extract already returns a typed scalar, so the comparison
     // value hint is unnecessary here.
+    if (path.sourceKind === "column") return quoteIdentifier(path.source);
     return `json_extract(${this.column}, '${jsonPath(path)}')`;
   }
 
   pathExists(path: FieldPath): string {
+    if (path.sourceKind === "column") return `${quoteIdentifier(path.source)} IS NOT NULL`;
     return `json_type(${this.column}, '${jsonPath(path)}') IS NOT NULL`;
   }
 
@@ -31,6 +33,11 @@ export class SqliteDialect implements SqlDialect {
     if (typeof value === "boolean") return value ? 1 : 0;
     return value;
   }
+}
+
+function quoteIdentifier(value: string): string {
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(value)) throw new Error(`Invalid identifier: ${value}`);
+  return `\"${value}\"`;
 }
 
 /** Render a FieldPath as a SQLite JSON path string, e.g. `$.profile.age` / `$.tags[0]`. */

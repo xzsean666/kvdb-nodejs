@@ -142,6 +142,22 @@ const adults = await users.find({ where: { "profile.age": { $gt: 18 } } });
 await db.close();
 ```
 
+Schema table 示例：
+
+```ts
+const blocks = db.table("blocks", {
+  schema: { columns: { blocknumber: { type: "integer", nullable: false } } },
+});
+await blocks.set("b1", { hash: "..." }, { columns: { blocknumber: 1 } });
+```
+
+物理表合规测试覆盖真实列/字段、registry 重开、索引、迁移和 columns/value 混合查询。SQLite 可直接运行；PostgreSQL/MongoDB 需设置 `KVDB_TEST_PG_URL` / `KVDB_TEST_MONGO_URL`：
+
+```bash
+pnpm test:compliance
+pnpm typecheck && pnpm build
+```
+
 ---
 
 ## 9. 发布(后续)

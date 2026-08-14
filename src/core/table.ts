@@ -16,14 +16,19 @@ import { serialize, deserialize } from "./serializer.js";
 import { KvdbError } from "./errors.js";
 import { toPhysicalKey, toUserKey, toPhysicalPrefix, namespacePrefix } from "./key.js";
 import type { KeyScope } from "./key.js";
-import { parseWhere, parseFindOptions } from "../query/parser.js";
+import { parseWhere, parseSchemaWhere, parseFindOptions } from "../query/parser.js";
 import { collectFieldPaths } from "../query/paths.js";
 import type { HookRuntime } from "../plugins/runtime.js";
 import type { AutoIndexManager } from "./auto-index.js";
+import type { TableSchema, PhysicalRecord } from "./table-schema.js";
+import { validateColumnValues } from "./table-schema.js";
+import type { SchemaTableDriver } from "../drivers/types.js";
 
 /** User-facing query document for `find` (parsed into the AST internally). */
 export interface FindQuery {
   where?: Record<string, unknown>;
+  /** Schema tables may explicitly target physical columns or value JSON. */
+  columns?: Record<string, unknown>;
   limit?: number;
   offset?: number;
   sort?: { path: string; direction?: "asc" | "desc" }[];
@@ -31,6 +36,7 @@ export interface FindQuery {
 
 export interface SetOptions {
   ttlMs?: number;
+  columns?: Record<string, unknown>;
 }
 
 /**
@@ -50,19 +56,37 @@ export interface TableDependencies {
   hooks: HookRuntime;
   /** Optional auto-index manager (opt-in via KVDBOptions.autoIndex). */
   autoIndex?: AutoIndexManager;
+  schemaName?: string;
+  schema?: TableSchema;
 }
 
-export class Table<Value = JsonValue> {
+export class Table<Value = JsonValue, Columns extends Record<string, unknown> = Record<string, unknown>> {
   constructor(private readonly deps: TableDependencies) {}
 
   private get namespace(): string {
     return this.deps.scope.namespace;
   }
 
+  private async schemaDriver(): Promise<SchemaTableDriver | undefined> {
+    if (!this.deps.schemaName) return undefined;
+    const driver = await this.deps.getDriver();
+    if (!driver.openSchemaTable) {
+      if (this.deps.schema) throw new KvdbError("UNSUPPORTED", "Driver does not support physical schema tables");
+      return undefined;
+    }
+    return driver.openSchemaTable(this.deps.schemaName, this.deps.schema);
+  }
+
   async set(key: string, value: Value, options: SetOptions = {}): Promise<void> {
     // KD-7: storing undefined is a deletion.
     if (value === undefined) {
       await this.delete(key);
+      return;
+    }
+    const schema = await this.schemaDriver();
+    if (schema) {
+      const columns = validateColumnValues(schema.schema, options.columns);
+      schema.setRecord(key, serialize(value as JsonValue), columns, options.ttlMs);
       return;
     }
     const before = await this.deps.hooks.run("beforeWrite", {
@@ -139,6 +163,11 @@ export class Table<Value = JsonValue> {
   }
 
   async get(key: string): Promise<Value | undefined> {
+    const schema = await this.schemaDriver();
+    if (schema) {
+      const record = await schema.getRecord(key);
+      return record ? deserialize<Value>(record.value) : undefined;
+    }
     const physicalKey = toPhysicalKey(this.deps.scope, key);
     await this.deps.hooks.run("beforeRead", { namespace: this.namespace, key, value: undefined });
 
@@ -164,6 +193,8 @@ export class Table<Value = JsonValue> {
   }
 
   async delete(key: string): Promise<boolean> {
+    const schema = await this.schemaDriver();
+    if (schema) return schema.delete(key);
     const driver = await this.deps.getDriver();
     const physicalKey = toPhysicalKey(this.deps.scope, key);
     const deleted = await driver.delete(physicalKey);
@@ -178,6 +209,8 @@ export class Table<Value = JsonValue> {
 
   /** Clear this namespace only (not the whole backend). */
   async clear(): Promise<void> {
+    const schema = await this.schemaDriver();
+    if (schema) { await schema.clear(); return; }
     const driver = await this.deps.getDriver();
     await driver.deleteByPrefix(namespacePrefix(this.deps.scope));
     // The shared cache may hold other namespaces; clear by prefix is not
@@ -245,6 +278,11 @@ export class Table<Value = JsonValue> {
   }
 
   async find(query: FindQuery = {}): Promise<{ key: string; value: Value }[]> {
+    const schema = await this.schemaDriver();
+    if (schema) {
+      const rows = await schema.find(parseSchemaWhere({ ...(query.where ?? {}), ...(query.columns ? { columns: query.columns } : {}) }), parseFindOptions(query));
+      return rows.map((row) => ({ key: row.key, value: deserialize<Value>(row.value) }));
+    }
     const driver = await this.deps.getDriver();
     const parsed = await this.deps.hooks.run("beforeQuery", {
       namespace: this.namespace,
@@ -268,6 +306,16 @@ export class Table<Value = JsonValue> {
       key: toUserKey(this.deps.scope, entry.key),
       value: deserialize<Value>(entry.value),
     }));
+  }
+
+  async getRecord(key: string): Promise<PhysicalRecord<Record<string, unknown>, Value> | undefined> {
+    const schema = await this.schemaDriver();
+    if (!schema) {
+      const value = await this.get(key);
+      return value === undefined ? undefined : { key, columns: {}, value };
+    }
+    const record = await schema.getRecord(key);
+    return record ? { key: record.key, columns: record.columns, value: deserialize<Value>(record.value) } : undefined;
   }
 
   async ensureIndex(jsonPath: string): Promise<void> {

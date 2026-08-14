@@ -58,6 +58,21 @@ export function parseWhere(where: Record<string, unknown> | undefined): QueryNod
   return children.length === 1 ? children[0]! : { kind: "and", children };
 }
 
+export function parseSchemaWhere(where: Record<string, unknown> | undefined): QueryNode {
+  if (!where) return { kind: "true" };
+  const parts: QueryNode[] = [];
+  for (const [source, fields] of Object.entries(where)) {
+    if (source !== "columns" && source !== "value") {
+      parts.push(parseField({ ...parsePath(source), sourceKind: "value" }, fields));
+      continue;
+    }
+    if (typeof fields !== "object" || fields === null || Array.isArray(fields)) throw new KvdbQueryError(`${source} where expects an object`);
+    const nodes = Object.entries(fields).map(([key, value]) => parseField({ ...parsePath(key), sourceKind: source as "value" | "column" }, value));
+    if (nodes.length) parts.push(nodes.length === 1 ? nodes[0]! : { kind: "and", children: nodes });
+  }
+  return parts.length === 0 ? { kind: "true" } : parts.length === 1 ? parts[0]! : { kind: "and", children: parts };
+}
+
 function parseEntry(key: string, value: unknown): QueryNode {
   switch (key) {
     case "$and":

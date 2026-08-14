@@ -55,3 +55,17 @@ export class KvdbConfigError extends KvdbError {
     this.name = "KvdbConfigError";
   }
 }
+
+export class KvdbSchemaError extends KvdbError {
+  constructor(message: string, options?: { cause?: unknown }) {
+    super("CONFIG", message, options);
+    this.name = "KvdbSchemaError";
+  }
+}
+
+export class KvdbMigrationError extends KvdbError {
+  constructor(message: string, options?: { cause?: unknown }) {
+    super("CONFIG", message, options);
+    this.name = "KvdbMigrationError";
+  }
+}

@@ -153,6 +153,17 @@
 - schema 变更走显式 migration，不在写入路径隐式 `ALTER TABLE`。
 - 现有普通 KV table、Cache、插件、TTL 和共享 `KVStore` 契约保持兼容。
 
-### 下一步
+### 本次升级交接（真实物理 schema table）
 
-用户需要明确批准后，才进入该需求的 Step 4 实现。实现前先按文档更新 `docs/ARCHITECTURE.md`、`docs/SPEC.md`、`docs/BUILD.md`，然后按 `TASKS.md` 增量开发并运行真实后端合规测试。
+- [x] Step 1 架构边界确认：独立物理 table/collection、provider-neutral registry、富层 Driver、AST `column/value` 来源。
+- [x] Step 2 更新 `docs/ARCHITECTURE.md`、`docs/SPEC.md`、`docs/BUILD.md`。
+- [x] Step 3 记录交接；用户已明确批准进入 Step 4。
+- [~] Step 4 进行中：已完成 schema 契约/运行时校验、SQLite registry + 独立物理表/列、列 CRUD/getRecord、SQLite columns/value 查询与索引创建；PG/Mongo、显式 migration API 和完整合规覆盖待继续实现。
+
+本需求保持 ESM、Node 24+、pnpm、TypeScript 5.8、TC39 decorators、普通 KV、Cache、插件和 TTL 契约不变。PG/Mongo 真实服务状态仍需在实现后诚实回填，不得伪造通过。
+
+### 本阶段验证
+
+- `pnpm typecheck` ✅
+- `pnpm build` ✅（ESM/CJS/d.ts）
+- `pnpm test`：非 SQLite 单测通过；SQLite 相关测试因 `better-sqlite3` 缺少 Node 24 原生 binding 未能执行。安装时 Node headers 下载失败（网络 ECONNRESET）。

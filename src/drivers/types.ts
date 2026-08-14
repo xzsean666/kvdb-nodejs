@@ -8,6 +8,17 @@
 import type { MaybePromise } from "../types/json.js";
 import type { KVStore, KVEntry, RawEntry } from "../cache/types.js";
 import type { QueryNode, FindOptions } from "../query/ast.js";
+import type { TableSchema, PhysicalRecord } from "../core/table-schema.js";
+import type { JsonValue } from "../types/json.js";
+
+export interface SchemaTableDriver<Value = JsonValue, Columns extends Record<string, unknown> = Record<string, unknown>> {
+  readonly schema: TableSchema<Columns>;
+  setRecord(key: string, value: string, columns: Record<string, unknown>, ttlMs?: number): MaybePromise<void>;
+  getRecord(key: string): MaybePromise<{ key: string; value: string; columns: Record<string, unknown>; expiresAt?: number } | undefined>;
+  delete(key: string): MaybePromise<boolean>;
+  clear(): MaybePromise<void>;
+  find(where: QueryNode, options?: FindOptions): MaybePromise<Array<{ key: string; value: string; columns: Record<string, unknown> }>>;
+}
 
 export type ProviderName = "sqlite" | "postgres" | "mongodb";
 
@@ -89,6 +100,8 @@ export interface Driver extends KVStore {
 
   /** Delete all currently-expired entries; returns how many were removed. */
   purgeExpired(): MaybePromise<number>;
+
+  openSchemaTable?<Columns extends Record<string, unknown>>(name: string, schema?: TableSchema<Columns>): MaybePromise<SchemaTableDriver<JsonValue, Columns> | undefined>;
 
   /** Native handle escape hatch (better-sqlite3 Database, pg Pool, Mongo Db). */
   raw(): unknown;
