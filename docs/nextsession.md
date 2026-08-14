@@ -1,7 +1,7 @@
 # nextsession.md — 上下文交接(Step 3 产出 + Step 4 进行中)
 
 > 每次会话开始先读 `AGENTS.md` 再读本文件。每完成一块工作后**更新本文件**。
-> 最后更新:2026-05-29(Step 4 进行中)。
+> 最后更新:2026-08-14(Step 4 进行中；新增真实物理列表升级文档)。
 
 ---
 
@@ -130,3 +130,29 @@
 
 > 若用户已批准 Step 4:从 待办#1(脚手架)开始,先 commit `feat: scaffold project`。
 > 若用户未批准:停在此处,回答用户对架构/规格的疑问,按需修订文档。
+
+---
+
+## 8. 新需求：真实物理列表升级（文档阶段）
+
+用户确认需要在保留 `db.table("name")` 使用方式的前提下，支持 schema table：自定义字段必须是真实数据库列/文档字段，而不是 `value` JSON 内的字段。无 schema 时继续使用普通 KV 表。
+
+本次仅完成文档，没有修改 `src/` 或测试代码：
+
+- `docs/physical-table-schema/UPGRADE.md`：架构、API、物理存储、索引、查询、迁移和验收标准。
+- `docs/physical-table-schema/TASKS.md`：按契约、registry、三后端、查询、迁移和合规测试拆分的实现任务。
+- `docs/physical-table-schema/IMPLEMENTATION-PROMPT.md`：交给 Claude Sonnet 5 或 ChatGPT Terra medium 的实现 Prompt。
+
+### 已确认设计方向
+
+- `db.table<Value, Columns>("blocks", { schema })` 首次操作时创建或校验独立物理 table/collection。
+- 后续 `db.table<Value, Columns>("blocks")` 按逻辑表名重新打开，schema 由 registry/物理结构恢复。
+- 列类型首期为 `string`、`integer`、`number`、`boolean`、`json`。
+- 列支持 `nullable`、`default`、单列 `index`；表级支持联合索引和 `unique`。
+- 查询统一使用 `where.columns` 查询物理列，`where.value` 查询 value JSON；旧 dotted value path 保持兼容。
+- schema 变更走显式 migration，不在写入路径隐式 `ALTER TABLE`。
+- 现有普通 KV table、Cache、插件、TTL 和共享 `KVStore` 契约保持兼容。
+
+### 下一步
+
+用户需要明确批准后，才进入该需求的 Step 4 实现。实现前先按文档更新 `docs/ARCHITECTURE.md`、`docs/SPEC.md`、`docs/BUILD.md`，然后按 `TASKS.md` 增量开发并运行真实后端合规测试。
