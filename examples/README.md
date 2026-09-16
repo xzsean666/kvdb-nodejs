@@ -40,13 +40,20 @@ pnpm examples                               # run them all, each in its own proc
 | `14-error-handling.ts` | typed errors (`KvdbConfigError`, `KvdbQueryError`, …) |
 | `15-update.ts` | partial `update` — shallow-merge / function patch, TTL preserved |
 | `16-dynamic-multi-keys.ts` | dynamic multi-keys, primary/secondary indexes, O(1) point lookup, schema evolution |
+| `17-mongodb.ts` | native MongoDB driver, document mapping, B-Tree index acceleration, multi-key collection |
+| `18-ecommerce-orders.ts` | real-world e-commerce system: integer PK, secondary keys, composite index, partial updates, pagination |
+| `19-schema-evolution-migrations.ts` | zero-downtime live schema evolution, default value backfilling, composite indexes, idempotency |
+| `20-cache-stampede-and-swr.ts` | cache stampede (thundering herd) request collapsing, stale-while-revalidate (SWR), tiered caching |
+| `21-practical-plugins-encryption-metrics.ts` | production plugins: execution latency metrics & transparent sensitive field encryption |
 
-## PostgreSQL examples
+## Database-backed examples (PostgreSQL & MongoDB)
 
-`07` and `08` use PostgreSQL when a connection string is available, and fall
-back / skip otherwise. Provide one via the environment or a repo-root
-`.env.test`:
+`07` and `17` connect to real database servers when credentials are provided in the environment or `.env.test`, and cleanly skip otherwise:
 
 ```bash
+# PostgreSQL example
 PG_DATABASE_URL=postgres://user:pass@host:5432/db pnpm example examples/07-postgresql.ts
+
+# MongoDB example
+MONGO_URL=mongodb://localhost:27017/test pnpm example examples/17-mongodb.ts
 ```
