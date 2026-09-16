@@ -19,7 +19,7 @@ export function compileMongoFilter(node: QueryNode): Record<string, unknown> {
 export function compileMongoSort(sort: SortSpec[]): Record<string, 1 | -1> {
   const result: Record<string, 1 | -1> = {};
   for (const spec of sort) {
-    result[FIELD_PREFIX + renderPath(spec.path)] = spec.direction === "desc" ? -1 : 1;
+    result[resolveField(spec.path, FIELD_PREFIX)] = spec.direction === "desc" ? -1 : 1;
   }
   return result;
 }
@@ -37,13 +37,21 @@ function compile(node: QueryNode, prefix: string): Record<string, unknown> {
     case "not":
       return { $nor: [compile(node.child, prefix)] };
     case "cmp":
-      return compileCompare(node.op, prefix + renderPath(node.path), node.value);
+      return compileCompare(node.op, resolveField(node.path, prefix), node.value);
     case "exists":
-      return { [prefix + renderPath(node.path)]: { $exists: node.value } };
+      return { [resolveField(node.path, prefix)]: { $exists: node.value } };
     case "elemMatch":
       // Inner conditions are relative to the array element (no field prefix).
-      return { [prefix + renderPath(node.path)]: { $elemMatch: compile(node.child, "") } };
+      return { [resolveField(node.path, prefix)]: { $elemMatch: compile(node.child, "") } };
   }
+}
+
+function resolveField(path: FieldPath, prefix: string): string {
+  if (path.sourceKind === "column") {
+    if (path.segments.length === 0) return path.source;
+    return `${path.source}.${renderPath(path)}`;
+  }
+  return prefix + renderPath(path);
 }
 
 function compileCompare(op: string, field: string, value: JsonValue): Record<string, unknown> {
@@ -57,3 +65,4 @@ function renderPath(path: FieldPath): string {
     .map((segment) => ("index" in segment ? String(segment.index) : segment.key))
     .join(".");
 }
+

@@ -39,6 +39,7 @@ pnpm examples                               # run them all, each in its own proc
 | `13-multiple-databases.ts` | multiple independent KVDB instances |
 | `14-error-handling.ts` | typed errors (`KvdbConfigError`, `KvdbQueryError`, …) |
 | `15-update.ts` | partial `update` — shallow-merge / function patch, TTL preserved |
+| `16-dynamic-multi-keys.ts` | dynamic multi-keys, primary/secondary indexes, O(1) point lookup, schema evolution |
 
 ## PostgreSQL examples
 

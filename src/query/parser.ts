@@ -58,21 +58,101 @@ export function parseWhere(where: Record<string, unknown> | undefined): QueryNod
   return children.length === 1 ? children[0]! : { kind: "and", children };
 }
 
-export function parseSchemaWhere(where: Record<string, unknown> | undefined): QueryNode {
-  if (!where) return { kind: "true" };
+import type { TableSchema, MultiKeySchema } from "../core/table-schema.js";
+
+function extractKnownColumns(schema?: TableSchema | MultiKeySchema | Set<string>): Set<string> {
+  if (!schema) return new Set();
+  if (schema instanceof Set) return schema;
+  const cols = new Set<string>();
+  if (schema.primaryKey?.name) cols.add(schema.primaryKey.name);
+  if (schema.keys) {
+    for (const k of Object.keys(schema.keys)) cols.add(k);
+  }
+  if (schema.columns) {
+    for (const k of Object.keys(schema.columns)) cols.add(k);
+  }
+  return cols;
+}
+
+export function parseSchemaWhere(
+  where: Record<string, unknown> | undefined,
+  knownSchema?: TableSchema | MultiKeySchema | Set<string>,
+): QueryNode {
+  if (!where || Object.keys(where).length === 0) return { kind: "true" };
+  const knownCols = extractKnownColumns(knownSchema);
+  return parseSchemaWhereNode(where, knownCols);
+}
+
+function parseSchemaWhereNode(where: Record<string, unknown>, knownCols: Set<string>): QueryNode {
   const parts: QueryNode[] = [];
-  for (const [source, fields] of Object.entries(where)) {
-    if (source !== "columns" && source !== "value") {
-      parts.push(parseField({ ...parsePath(source), sourceKind: "value" }, fields));
-      continue;
+  for (const [key, value] of Object.entries(where)) {
+    switch (key) {
+      case "$and":
+        parts.push({ kind: "and", children: parseSchemaBranchList(key, value, knownCols) });
+        break;
+      case "$or":
+        parts.push({ kind: "or", children: parseSchemaBranchList(key, value, knownCols) });
+        break;
+      case "$nor":
+        parts.push({ kind: "nor", children: parseSchemaBranchList(key, value, knownCols) });
+        break;
+      case "$not":
+        parts.push({ kind: "not", child: parseSchemaWhereNode(asObject(key, value), knownCols) });
+        break;
+      case "columns": {
+        if (typeof value !== "object" || value === null || Array.isArray(value)) {
+          throw new KvdbQueryError("columns where expects an object");
+        }
+        const colNodes = Object.entries(value).map(([colKey, colVal]) => parseColumnField(colKey, colVal));
+        if (colNodes.length) parts.push(colNodes.length === 1 ? colNodes[0]! : { kind: "and", children: colNodes });
+        break;
+      }
+      case "value": {
+        if (typeof value !== "object" || value === null || Array.isArray(value)) {
+          throw new KvdbQueryError("value where expects an object");
+        }
+        const valNodes = Object.entries(value).map(([valKey, valVal]) =>
+          parseField({ ...parsePath(valKey), sourceKind: "value" }, valVal)
+        );
+        if (valNodes.length) parts.push(valNodes.length === 1 ? valNodes[0]! : { kind: "and", children: valNodes });
+        break;
+      }
+      default: {
+        if (key.startsWith("$")) {
+          throw new KvdbQueryError(`Unknown top-level operator "${key}"`);
+        }
+        const root = key.split(".")[0]!;
+        if (knownCols.has(root)) {
+          parts.push(parseColumnField(key, value));
+        } else {
+          parts.push(parseField({ ...parsePath(key), sourceKind: "value" }, value));
+        }
+        break;
+      }
     }
-    if (typeof fields !== "object" || fields === null || Array.isArray(fields)) throw new KvdbQueryError(`${source} where expects an object`);
-    const sourceKind = source === "columns" ? "column" : "value";
-    const nodes = Object.entries(fields).map(([key, value]) => parseField({ ...parsePath(key), sourceKind }, value));
-    if (nodes.length) parts.push(nodes.length === 1 ? nodes[0]! : { kind: "and", children: nodes });
   }
   return parts.length === 0 ? { kind: "true" } : parts.length === 1 ? parts[0]! : { kind: "and", children: parts };
 }
+
+function parseSchemaBranchList(op: string, value: unknown, knownCols: Set<string>): QueryNode[] {
+  if (!Array.isArray(value)) throw new KvdbQueryError(`${op} expects an array`);
+  return value.map((branch) => parseSchemaWhereNode(asObject(op, branch), knownCols));
+}
+
+function parseColumnField(key: string, value: unknown): QueryNode {
+  const parts = key.split(".");
+  const colName = parts[0]!;
+  const subSegments: PathSegment[] = parts.slice(1).map((part) =>
+    /^\d+$/.test(part) ? { index: Number(part) } : { key: part }
+  );
+  const path: FieldPath = {
+    source: colName,
+    sourceKind: "column",
+    segments: subSegments,
+  };
+  return parseField(path, value);
+}
+
 
 function parseEntry(key: string, value: unknown): QueryNode {
   switch (key) {
@@ -144,23 +224,45 @@ function asObject(op: string, value: unknown): Record<string, unknown> {
 /** Parse sort specs from the user query into AST SortSpecs. */
 export function parseSort(
   sort: { path: string; direction?: "asc" | "desc" }[] | undefined,
+  knownSchema?: TableSchema | MultiKeySchema | Set<string>,
 ): SortSpec[] | undefined {
   if (sort === undefined) return undefined;
-  return sort.map((spec) => ({
-    path: parsePath(spec.path),
-    direction: spec.direction ?? "asc",
-  }));
+  const knownCols = extractKnownColumns(knownSchema);
+  return sort.map((spec) => {
+    const root = spec.path.split(".")[0]!;
+    let path: FieldPath;
+    if (knownCols.has(root)) {
+      const parts = spec.path.split(".");
+      path = {
+        source: parts[0]!,
+        sourceKind: "column",
+        segments: parts.slice(1).map((part) =>
+          /^\d+$/.test(part) ? { index: Number(part) } : { key: part },
+        ),
+      };
+    } else {
+      path = parsePath(spec.path);
+    }
+    return {
+      path,
+      direction: spec.direction ?? "asc",
+    };
+  });
 }
 
 /** Build FindOptions from the user-facing query document. */
-export function parseFindOptions(query: {
-  limit?: number;
-  offset?: number;
-  sort?: { path: string; direction?: "asc" | "desc" }[];
-}): FindOptions {
+export function parseFindOptions(
+  query: {
+    limit?: number;
+    offset?: number;
+    sort?: { path: string; direction?: "asc" | "desc" }[];
+  },
+  knownSchema?: TableSchema | MultiKeySchema | Set<string>,
+): FindOptions {
   return {
     limit: query.limit,
     offset: query.offset,
-    sort: parseSort(query.sort),
+    sort: parseSort(query.sort, knownSchema),
   };
 }
+

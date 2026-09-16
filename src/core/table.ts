@@ -20,9 +20,17 @@ import { parseWhere, parseSchemaWhere, parseFindOptions } from "../query/parser.
 import { collectFieldPaths } from "../query/paths.js";
 import type { HookRuntime } from "../plugins/runtime.js";
 import type { AutoIndexManager } from "./auto-index.js";
-import type { TableSchema, PhysicalRecord } from "./table-schema.js";
+import type {
+  TableSchema,
+  MultiKeySchema,
+  PhysicalRecord,
+  KeyDefinition,
+  TableIndexDefinition,
+  MultiKeyIndexDefinition,
+} from "./table-schema.js";
 import { validateColumnValues } from "./table-schema.js";
 import type { SchemaTableDriver } from "../drivers/types.js";
+
 
 /** User-facing query document for `find` (parsed into the AST internally). */
 export interface FindQuery {
@@ -34,9 +42,10 @@ export interface FindQuery {
   sort?: { path: string; direction?: "asc" | "desc" }[];
 }
 
-export interface SetOptions {
+export interface SetOptions<Columns = Record<string, unknown>> {
   ttlMs?: number;
-  columns?: Record<string, unknown>;
+  columns?: Partial<Columns> | Record<string, unknown>;
+  keys?: Partial<Columns> | Record<string, unknown>;
 }
 
 /**
@@ -57,7 +66,7 @@ export interface TableDependencies {
   /** Optional auto-index manager (opt-in via KVDBOptions.autoIndex). */
   autoIndex?: AutoIndexManager;
   schemaName?: string;
-  schema?: TableSchema;
+  schema?: TableSchema | MultiKeySchema;
 }
 
 export class Table<Value = JsonValue, Columns extends Record<string, unknown> = Record<string, unknown>> {
@@ -77,7 +86,7 @@ export class Table<Value = JsonValue, Columns extends Record<string, unknown> = 
     return driver.openSchemaTable(this.deps.schemaName, this.deps.schema);
   }
 
-  async set(key: string, value: Value, options: SetOptions = {}): Promise<void> {
+  async set(key: string | number, value: Value, options: SetOptions<Columns> = {}): Promise<void> {
     // KD-7: storing undefined is a deletion.
     if (value === undefined) {
       await this.delete(key);
@@ -85,13 +94,15 @@ export class Table<Value = JsonValue, Columns extends Record<string, unknown> = 
     }
     const schema = await this.schemaDriver();
     if (schema) {
-      const columns = validateColumnValues(schema.schema, options.columns);
-      schema.setRecord(key, serialize(value as JsonValue), columns, options.ttlMs);
+      const rawKeys = (options.keys ?? options.columns) as Record<string, unknown> | undefined;
+      const columns = validateColumnValues(schema.schema, rawKeys);
+      await schema.setRecord(key, serialize(value as JsonValue), columns, options.ttlMs);
       return;
     }
+    const strKey = String(key);
     const before = await this.deps.hooks.run("beforeWrite", {
       namespace: this.namespace,
-      key,
+      key: strKey,
       value: value as JsonValue,
       ttlMs: options.ttlMs,
     });
@@ -162,14 +173,15 @@ export class Table<Value = JsonValue, Columns extends Record<string, unknown> = 
     return written;
   }
 
-  async get(key: string): Promise<Value | undefined> {
+  async get(key: string | number): Promise<Value | undefined> {
     const schema = await this.schemaDriver();
     if (schema) {
       const record = await schema.getRecord(key);
       return record ? deserialize<Value>(record.value) : undefined;
     }
-    const physicalKey = toPhysicalKey(this.deps.scope, key);
-    await this.deps.hooks.run("beforeRead", { namespace: this.namespace, key, value: undefined });
+    const strKey = String(key);
+    const physicalKey = toPhysicalKey(this.deps.scope, strKey);
+    await this.deps.hooks.run("beforeRead", { namespace: this.namespace, key: strKey, value: undefined });
 
     let value: Value | undefined;
     const cached = this.deps.cache ? await this.deps.cache.get<Value>(physicalKey) : undefined;
@@ -186,25 +198,28 @@ export class Table<Value = JsonValue, Columns extends Record<string, unknown> = 
 
     const after = await this.deps.hooks.run("afterRead", {
       namespace: this.namespace,
-      key,
+      key: strKey,
       value: value as JsonValue | undefined,
     });
     return after.value as Value | undefined;
   }
 
-  async delete(key: string): Promise<boolean> {
+  async delete(key: string | number): Promise<boolean> {
     const schema = await this.schemaDriver();
     if (schema) return schema.delete(key);
     const driver = await this.deps.getDriver();
-    const physicalKey = toPhysicalKey(this.deps.scope, key);
+    const strKey = String(key);
+    const physicalKey = toPhysicalKey(this.deps.scope, strKey);
     const deleted = await driver.delete(physicalKey);
     if (this.deps.cache) await this.deps.cache.delete(physicalKey);
     return deleted;
   }
 
-  async exists(key: string): Promise<boolean> {
+  async exists(key: string | number): Promise<boolean> {
+    const schema = await this.schemaDriver();
+    if (schema) return (await schema.getRecord(key)) !== undefined;
     const driver = await this.deps.getDriver();
-    return driver.has(toPhysicalKey(this.deps.scope, key));
+    return driver.has(toPhysicalKey(this.deps.scope, String(key)));
   }
 
   /** Clear this namespace only (not the whole backend). */
@@ -280,9 +295,16 @@ export class Table<Value = JsonValue, Columns extends Record<string, unknown> = 
   async find(query: FindQuery = {}): Promise<{ key: string; value: Value }[]> {
     const schema = await this.schemaDriver();
     if (schema) {
-      const rows = await schema.find(parseSchemaWhere({ ...(query.where ?? {}), ...(query.columns ? { columns: query.columns } : {}) }), parseFindOptions(query));
-      return rows.map((row) => ({ key: row.key, value: deserialize<Value>(row.value) }));
+      const mergedWhere = {
+        ...(query.where ?? {}),
+        ...(query.columns ? { columns: query.columns } : {}),
+      };
+      const whereNode = parseSchemaWhere(mergedWhere, schema.schema);
+      const findOpts = parseFindOptions(query, schema.schema);
+      const rows = await schema.find(whereNode, findOpts);
+      return rows.map((row) => ({ key: String(row.key), value: deserialize<Value>(row.value) }));
     }
+
     const driver = await this.deps.getDriver();
     const parsed = await this.deps.hooks.run("beforeQuery", {
       namespace: this.namespace,
@@ -308,21 +330,116 @@ export class Table<Value = JsonValue, Columns extends Record<string, unknown> = 
     }));
   }
 
-  async getRecord(key: string): Promise<PhysicalRecord<Record<string, unknown>, Value> | undefined> {
+  async findRecords(query: FindQuery = {}): Promise<PhysicalRecord<Columns, Value>[]> {
+    const schema = await this.schemaDriver();
+    if (!schema) {
+      const items = await this.find(query);
+      return items.map((item) => ({
+        key: item.key as any,
+        columns: {} as Partial<Columns>,
+        keys: {} as Partial<Columns>,
+        value: item.value,
+      }));
+    }
+    const mergedWhere = {
+      ...(query.where ?? {}),
+      ...(query.columns ? { columns: query.columns } : {}),
+    };
+    const whereNode = parseSchemaWhere(mergedWhere, schema.schema);
+    const findOpts = parseFindOptions(query, schema.schema);
+    const rows = await schema.find(whereNode, findOpts);
+    return rows.map((row) => ({
+      key: row.key as any,
+      columns: row.columns as Partial<Columns>,
+      keys: row.columns as Partial<Columns>,
+      value: deserialize<Value>(row.value),
+    }));
+  }
+
+  async getRecord(key: string | number): Promise<PhysicalRecord<Columns, Value> | undefined> {
     const schema = await this.schemaDriver();
     if (!schema) {
       const value = await this.get(key);
-      return value === undefined ? undefined : { key, columns: {}, value };
+      return value === undefined ? undefined : { key: key as any, columns: {} as Partial<Columns>, keys: {} as Partial<Columns>, value };
     }
     const record = await schema.getRecord(key);
-    return record ? { key: record.key, columns: record.columns, value: deserialize<Value>(record.value) } : undefined;
+    return record
+      ? {
+          key: record.key as any,
+          columns: record.columns as Partial<Columns>,
+          keys: record.columns as Partial<Columns>,
+          value: deserialize<Value>(record.value),
+        }
+      : undefined;
+  }
+
+  /**
+   * Fast O(1) point lookup by any indexed secondary key.
+   */
+  async getBy(keyName: string, keyValue: unknown): Promise<PhysicalRecord<Columns, Value> | undefined> {
+    const schema = await this.schemaDriver();
+    if (!schema) {
+      throw new KvdbError(
+        "UNSUPPORTED",
+        `Cannot getBy on table "${this.deps.schemaName ?? this.namespace}": not a physical schema table`,
+      );
+    }
+    if (!schema.getRecordByKey) {
+      throw new KvdbError("UNSUPPORTED", "Driver does not support getRecordByKey");
+    }
+    const record = await schema.getRecordByKey(keyName, keyValue);
+    return record
+      ? {
+          key: record.key as any,
+          columns: record.columns as Partial<Columns>,
+          keys: record.columns as Partial<Columns>,
+          value: deserialize<Value>(record.value),
+        }
+      : undefined;
   }
 
   async ensureIndex(jsonPath: string): Promise<void> {
     const driver = await this.deps.getDriver();
     await driver.ensureIndex(jsonPath);
   }
+
+  /**
+   * Dynamically add a secondary key to this table and evolve underlying physical schema.
+   */
+  async addKey(name: string, definition: KeyDefinition): Promise<void> {
+    const schemaDriver = await this.schemaDriver();
+    if (!schemaDriver) {
+      throw new KvdbError(
+        "UNSUPPORTED",
+        `Cannot add key "${name}": table "${this.deps.schemaName ?? this.namespace}" is not a physical schema table`,
+      );
+    }
+    if (!schemaDriver.addKey) {
+      throw new KvdbError("UNSUPPORTED", "Driver does not support dynamic key addition");
+    }
+    await schemaDriver.addKey(name, definition);
+    this.deps.schema = schemaDriver.schema;
+  }
+
+  /**
+   * Dynamically add an index to this table.
+   */
+  async addIndex(definition: TableIndexDefinition | MultiKeyIndexDefinition): Promise<void> {
+    const schemaDriver = await this.schemaDriver();
+    if (!schemaDriver) {
+      throw new KvdbError(
+        "UNSUPPORTED",
+        `Cannot add index: table "${this.deps.schemaName ?? this.namespace}" is not a physical schema table`,
+      );
+    }
+    if (!schemaDriver.addIndex) {
+      throw new KvdbError("UNSUPPORTED", "Driver does not support dynamic index addition");
+    }
+    await schemaDriver.addIndex(definition);
+    this.deps.schema = schemaDriver.schema;
+  }
 }
+
 
 /** Apply an {@link UpdatePatch} to the current value (see {@link Table.update}). */
 function applyPatch<Value>(current: Value, patch: UpdatePatch<Value>): Value {

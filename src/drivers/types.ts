@@ -8,17 +8,32 @@
 import type { MaybePromise } from "../types/json.js";
 import type { KVStore, KVEntry, RawEntry } from "../cache/types.js";
 import type { QueryNode, FindOptions } from "../query/ast.js";
-import type { TableSchema, PhysicalRecord } from "../core/table-schema.js";
+import type {
+  TableSchema,
+  MultiKeySchema,
+  PhysicalRecord,
+  KeyDefinition,
+  TableIndexDefinition,
+  MultiKeyIndexDefinition,
+} from "../core/table-schema.js";
+
 import type { JsonValue } from "../types/json.js";
 
 export interface SchemaTableDriver<Value = JsonValue, Columns extends Record<string, unknown> = Record<string, unknown>> {
-  readonly schema: TableSchema<Columns>;
-  setRecord(key: string, value: string, columns: Record<string, unknown>, ttlMs?: number): MaybePromise<void>;
-  getRecord(key: string): MaybePromise<{ key: string; value: string; columns: Record<string, unknown>; expiresAt?: number } | undefined>;
-  delete(key: string): MaybePromise<boolean>;
+  schema: TableSchema<Columns>;
+  setRecord(key: string | number, value: string, columns: Record<string, unknown>, ttlMs?: number): MaybePromise<void>;
+  getRecord(key: string | number): MaybePromise<{ key: string | number; value: string; columns: Record<string, unknown>; expiresAt?: number } | undefined>;
+  getRecordByKey?(keyName: string, keyValue: unknown): MaybePromise<{ key: string | number; value: string; columns: Record<string, unknown>; expiresAt?: number } | undefined>;
+  delete(key: string | number): MaybePromise<boolean>;
   clear(): MaybePromise<void>;
-  find(where: QueryNode, options?: FindOptions): MaybePromise<Array<{ key: string; value: string; columns: Record<string, unknown> }>>;
+  find(where: QueryNode, options?: FindOptions): MaybePromise<Array<{ key: string | number; value: string; columns: Record<string, unknown> }>>;
+  /** Dynamically add a secondary key to this physical table and update registry. */
+  addKey?(name: string, definition: KeyDefinition): MaybePromise<void>;
+  /** Dynamically add an index to this physical table and update registry. */
+  addIndex?(definition: TableIndexDefinition | MultiKeyIndexDefinition): MaybePromise<void>;
 }
+
+
 
 export type ProviderName = "sqlite" | "postgres" | "mongodb";
 
@@ -101,7 +116,8 @@ export interface Driver extends KVStore {
   /** Delete all currently-expired entries; returns how many were removed. */
   purgeExpired(): MaybePromise<number>;
 
-  openSchemaTable?<Columns extends Record<string, unknown>>(name: string, schema?: TableSchema<Columns>): MaybePromise<SchemaTableDriver<JsonValue, Columns> | undefined>;
+  openSchemaTable?<Columns extends Record<string, unknown>>(name: string, schema?: TableSchema<Columns> | MultiKeySchema<Columns>): MaybePromise<SchemaTableDriver<JsonValue, Columns> | undefined>;
+
 
   /** Native handle escape hatch (better-sqlite3 Database, pg Pool, Mongo Db). */
   raw(): unknown;

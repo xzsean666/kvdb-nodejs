@@ -23,8 +23,23 @@ import { parsePath } from "../../query/parser.js";
 import { SqliteDialect } from "./dialect.js";
 import { expiresAtFromTtl } from "../../core/expiry.js";
 import { KvdbConfigError, KvdbConnectionError } from "../../core/errors.js";
-import { validateTableSchema, schemasEqual } from "../../core/table-schema.js";
-import type { TableSchema } from "../../core/table-schema.js";
+import {
+  validateTableSchema,
+  schemasEqual,
+  evolveSchemaAddKey,
+  evolveSchemaAddIndex,
+  normalizeTableSchema,
+} from "../../core/table-schema.js";
+import type {
+  TableSchema,
+  MultiKeySchema,
+  KeyDefinition,
+  TableIndexDefinition,
+  MultiKeyIndexDefinition,
+  NormalizedSchema,
+} from "../../core/table-schema.js";
+
+
 import type { SchemaTableDriver } from "../types.js";
 
 const PROVIDER: ProviderName = "sqlite";
@@ -267,8 +282,9 @@ class SqliteDriver implements Driver {
 
   openSchemaTable<Columns extends Record<string, unknown>>(
     name: string,
-    schema?: TableSchema<Columns>,
+    schema?: TableSchema<Columns> | MultiKeySchema<Columns>,
   ): SchemaTableDriver<unknown, Columns> | undefined {
+
     this.database.exec("CREATE TABLE IF NOT EXISTS kvdb_schema_registry (logical_name TEXT PRIMARY KEY, schema_json TEXT NOT NULL)");
     const existing = this.database.prepare("SELECT schema_json FROM kvdb_schema_registry WHERE logical_name = ?").get(name) as { schema_json: string } | undefined;
     if (existing && schema && !schemasEqual(JSON.parse(existing.schema_json) as TableSchema, schema)) {
@@ -277,15 +293,18 @@ class SqliteDriver implements Driver {
     const resolved = (schema ?? (existing ? JSON.parse(existing.schema_json) : undefined)) as TableSchema<Columns> | undefined;
     if (!resolved) return undefined;
     validateTableSchema(resolved);
+    const norm = normalizeTableSchema(resolved);
     const physical = schemaTableName(name);
     if (!existing) {
-      const definitions = Object.entries(resolved.columns).map(([column, definition]) => `${column} ${sqliteType(definition.type)}${definition.nullable === false ? " NOT NULL" : ""}${definition.default !== undefined ? ` DEFAULT ${sqlDefault(definition.default)}` : ""}`).join(",\n");
-      this.database.exec(`CREATE TABLE IF NOT EXISTS ${physical} (key TEXT PRIMARY KEY, ${definitions}${definitions ? "," : ""} value TEXT NOT NULL, expires_at INTEGER, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)`);
+      const pkSql = `${norm.primaryKey.name} ${norm.primaryKey.type === "integer" ? "INTEGER PRIMARY KEY" : "TEXT PRIMARY KEY"}`;
+      const definitions = Object.entries(norm.keys).map(([column, definition]) => `${column} ${sqliteType(definition.type)}${definition.nullable === false ? " NOT NULL" : ""}${definition.default !== undefined ? ` DEFAULT ${sqlDefault(definition.default)}` : ""}`).join(",\n");
+      this.database.exec(`CREATE TABLE IF NOT EXISTS ${physical} (${pkSql}, ${definitions}${definitions ? "," : ""} value TEXT NOT NULL, expires_at INTEGER, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)`);
+      this.database.exec(`CREATE INDEX IF NOT EXISTS ${physical}_expires_at ON ${physical} (expires_at)`);
       this.database.prepare("INSERT INTO kvdb_schema_registry (logical_name, schema_json) VALUES (?, ?)").run(name, JSON.stringify(resolved));
-      for (const [column, definition] of Object.entries(resolved.columns)) if (definition.index) this.createColumnIndex(physical, column, typeof definition.index === "object" ? definition.index : {});
-      for (const index of resolved.indexes ?? []) this.createCompositeIndex(physical, index);
+      for (const [column, definition] of Object.entries(norm.keys)) if (definition.index) this.createColumnIndex(physical, column, typeof definition.index === "object" ? definition.index : {});
+      for (const index of norm.indexes) this.createCompositeIndex(physical, index);
     }
-    return new SqliteSchemaTable(this.database, physical, resolved);
+    return new SqliteSchemaTable(this.database, physical, name, resolved);
   }
 
   private createColumnIndex(table: string, column: string, options: { name?: string; unique?: boolean }): void {
@@ -313,57 +332,220 @@ class SqliteDriver implements Driver {
 }
 
 class SqliteSchemaTable<Columns extends Record<string, unknown>> implements SchemaTableDriver<unknown, Columns> {
-  constructor(private readonly database: BetterSqlite3.Database, private readonly table: string, readonly schema: TableSchema<Columns>) {}
-  setRecord(key: string, value: string, columns: Record<string, unknown>, ttlMs?: number): void {
-    const names = Object.keys(this.schema.columns);
-    const now = Date.now();
-    const fields = ["key", ...names, "value", "expires_at", "created_at", "updated_at"];
-    const placeholders = fields.map((field) => `@${field}`).join(",");
-    const params: Record<string, unknown> = { key, value, expires_at: expiresAtFromTtl(ttlMs, now) ?? null, created_at: now, updated_at: now };
-    for (const name of names) {
-      const value = columns[name];
-      const type = this.schema.columns[name]!.type;
-      params[name] = value === undefined ? null : type === "json" ? JSON.stringify(value) : type === "boolean" ? (value ? 1 : 0) : value;
-    }
-    this.database.prepare(`INSERT INTO ${this.table} (${fields.join(",")}) VALUES (${placeholders}) ON CONFLICT(key) DO UPDATE SET ${[...names, "value", "expires_at", "updated_at"].map((field) => `${field}=excluded.${field}`).join(",")}`).run(params);
+  schema: TableSchema<Columns>;
+
+  constructor(
+    private readonly database: BetterSqlite3.Database,
+    private readonly table: string,
+    private readonly logicalName: string,
+    schema: TableSchema<Columns>,
+  ) {
+    this.schema = schema;
   }
-  getRecord(key: string): { key: string; value: string; columns: Record<string, unknown>; expiresAt?: number } | undefined {
-    const row = this.database.prepare(`SELECT * FROM ${this.table} WHERE key = ?`).get(key) as Record<string, unknown> | undefined;
+
+  private get pkName(): string {
+    return this.schema.primaryKey?.name ?? "key";
+  }
+
+  private get secondaryKeys(): Record<string, KeyDefinition> {
+    return (this.schema.keys ?? this.schema.columns ?? {}) as Record<string, KeyDefinition>;
+  }
+
+  setRecord(key: string | number, value: string, columns: Record<string, unknown>, ttlMs?: number): void {
+    const pk = this.pkName;
+    const names = Object.keys(this.secondaryKeys);
+    const now = Date.now();
+    const fields = [pk, ...names, "value", "expires_at", "created_at", "updated_at"];
+    const placeholders = fields.map((field) => `@${field}`).join(",");
+    const params: Record<string, unknown> = {
+      [pk]: key,
+      value,
+      expires_at: expiresAtFromTtl(ttlMs, now) ?? null,
+      created_at: now,
+      updated_at: now,
+    };
+    for (const name of names) {
+      const def = this.secondaryKeys[name]!;
+      const val = columns[name] !== undefined ? columns[name] : (def.default !== undefined ? def.default : null);
+      if (val === null || val === undefined) {
+        params[name] = null;
+      } else if (def.type === "boolean") {
+        params[name] = val ? 1 : 0;
+      } else if (def.type === "json") {
+        params[name] = JSON.stringify(val);
+      } else {
+        params[name] = val;
+      }
+    }
+    const updateClauses = [...names, "value", "expires_at", "updated_at"].map((field) => `${field}=excluded.${field}`).join(",");
+    this.database.prepare(
+      `INSERT INTO ${this.table} (${fields.join(",")}) VALUES (${placeholders}) ON CONFLICT(${pk}) DO UPDATE SET ${updateClauses}`
+    ).run(params);
+  }
+
+  getRecord(key: string | number): { key: string | number; value: string; columns: Record<string, unknown>; expiresAt?: number } | undefined {
+    const pk = this.pkName;
+    const row = this.database.prepare(`SELECT * FROM ${this.table} WHERE ${pk} = ?`).get(key) as Record<string, unknown> | undefined;
     if (!row) return undefined;
     const expiry = row.expires_at as number | null;
-    if (expiry !== null && expiry <= Date.now()) { this.delete(key); return undefined; }
-    const columns: Record<string, unknown> = {};
-    for (const [name, definition] of Object.entries(this.schema.columns)) {
-      const raw = row[name];
-      columns[name] = raw === null ? null : definition.type === "json" && typeof raw === "string" ? JSON.parse(raw) : definition.type === "boolean" ? Boolean(raw) : raw;
+    if (expiry !== null && expiry <= Date.now()) {
+      this.delete(key);
+      return undefined;
     }
-    return { key: row.key as string, value: row.value as string, columns, expiresAt: expiry ?? undefined };
+    const columns: Record<string, unknown> = {};
+    for (const [name, definition] of Object.entries(this.secondaryKeys)) {
+      const raw = row[name];
+      columns[name] = raw === null ? null
+        : definition.type === "json" && typeof raw === "string" ? JSON.parse(raw)
+        : definition.type === "boolean" ? Boolean(raw)
+        : raw;
+    }
+    return {
+      key: row[pk] as string | number,
+      value: row.value as string,
+      columns,
+      expiresAt: expiry ?? undefined,
+    };
   }
-  delete(key: string): boolean { return this.database.prepare(`DELETE FROM ${this.table} WHERE key = ?`).run(key).changes > 0; }
-  clear(): void { this.database.exec(`DELETE FROM ${this.table}`); }
-  find(where: QueryNode, options: FindOptions = {}): Array<{ key: string; value: string; columns: Record<string, unknown> }> {
+
+  getRecordByKey(keyName: string, keyValue: unknown): { key: string | number; value: string; columns: Record<string, unknown>; expiresAt?: number } | undefined {
+    const pk = this.pkName;
+    if (keyName === pk) {
+      return this.getRecord(keyValue as string | number);
+    }
+    const def = this.secondaryKeys[keyName];
+    if (!def) {
+      throw new KvdbConfigError(`Unknown key: ${keyName}`);
+    }
+    const param = keyValue === null || keyValue === undefined ? null
+      : def.type === "json" ? JSON.stringify(keyValue)
+      : def.type === "boolean" ? (keyValue ? 1 : 0)
+      : keyValue;
+
+    const row = this.database.prepare(`SELECT * FROM ${this.table} WHERE ${keyName} = ?`).get(param) as Record<string, unknown> | undefined;
+    if (!row) return undefined;
+    const expiry = row.expires_at as number | null;
+    if (expiry !== null && expiry <= Date.now()) {
+      this.delete(row[pk] as string | number);
+      return undefined;
+    }
+    const columns: Record<string, unknown> = {};
+    for (const [name, definition] of Object.entries(this.secondaryKeys)) {
+      const raw = row[name];
+      columns[name] = raw === null ? null
+        : definition.type === "json" && typeof raw === "string" ? JSON.parse(raw)
+        : definition.type === "boolean" ? Boolean(raw)
+        : raw;
+    }
+    return {
+      key: row[pk] as string | number,
+      value: row.value as string,
+      columns,
+      expiresAt: expiry ?? undefined,
+    };
+  }
+
+  delete(key: string | number): boolean {
+    const pk = this.pkName;
+    return this.database.prepare(`DELETE FROM ${this.table} WHERE ${pk} = ?`).run(key).changes > 0;
+  }
+
+  clear(): void {
+    this.database.exec(`DELETE FROM ${this.table}`);
+  }
+
+  find(where: QueryNode, options: FindOptions = {}): Array<{ key: string | number; value: string; columns: Record<string, unknown> }> {
     validateQueryColumns(where, this.schema);
     const dialect = new SqliteDialect("value");
     const compiled = compileWhere(where, dialect);
     const params: unknown[] = [Date.now(), ...compiled.params];
     let sql = `SELECT * FROM ${this.table} WHERE (expires_at IS NULL OR expires_at > ?) AND (${compiled.sql})`;
     if (options.sort?.length) sql += ` ORDER BY ${compileOrderBy(options.sort, dialect)}`;
-    if (options.limit !== undefined) { sql += " LIMIT ?"; params.push(options.limit); }
-    if (options.offset !== undefined) { sql += options.limit === undefined ? " LIMIT -1 OFFSET ?" : " OFFSET ?"; params.push(options.offset); }
+    if (options.limit !== undefined) {
+      sql += " LIMIT ?";
+      params.push(options.limit);
+    }
+    if (options.offset !== undefined) {
+      sql += options.limit === undefined ? " LIMIT -1 OFFSET ?" : " OFFSET ?";
+      params.push(options.offset);
+    }
     const rows = this.database.prepare(sql).all(...params) as Record<string, unknown>[];
-    return rows.map((row) => ({ key: row.key as string, value: row.value as string, columns: Object.fromEntries(Object.keys(this.schema.columns).map((name) => [name, row[name]])) }));
+    const pk = this.pkName;
+    return rows.map((row) => {
+      const columns: Record<string, unknown> = {};
+      for (const [name, definition] of Object.entries(this.secondaryKeys)) {
+        const raw = row[name];
+        columns[name] = raw === null ? null
+          : definition.type === "json" && typeof raw === "string" ? JSON.parse(raw)
+          : definition.type === "boolean" ? Boolean(raw)
+          : raw;
+      }
+      return {
+        key: row[pk] as string | number,
+        value: row.value as string,
+        columns,
+      };
+    });
+  }
+
+  addKey(name: string, definition: KeyDefinition): void {
+    const evolved = evolveSchemaAddKey(this.schema, name, definition);
+    if (schemasEqual(this.schema, evolved)) return;
+
+    const colSql = `${name} ${sqliteType(definition.type)}${definition.nullable === false ? " NOT NULL" : ""}${definition.default !== undefined ? ` DEFAULT ${sqlDefault(definition.default)}` : ""}`;
+    this.database.exec(`ALTER TABLE ${this.table} ADD COLUMN ${colSql}`);
+
+    if (definition.index) {
+      const idxOpts = typeof definition.index === "object" ? definition.index : {};
+      const idxName = idxOpts.name ?? `${this.table}_${name}_idx`;
+      this.database.exec(`CREATE ${idxOpts.unique ? "UNIQUE " : ""}INDEX IF NOT EXISTS ${idxName} ON ${this.table} (${name})`);
+    }
+
+    this.schema = evolved as unknown as TableSchema<Columns>;
+    this.database.prepare("UPDATE kvdb_schema_registry SET schema_json = ? WHERE logical_name = ?").run(
+      JSON.stringify(this.schema),
+      this.logicalName,
+    );
+  }
+
+  addIndex(definition: TableIndexDefinition | MultiKeyIndexDefinition): void {
+    const evolved = evolveSchemaAddIndex(this.schema, definition);
+    if (schemasEqual(this.schema, evolved)) return;
+
+    const cols = definition.keys ?? definition.columns ?? [];
+    const idxName = definition.name ?? `${this.table}_${cols.join("_")}_idx`;
+    this.database.exec(`CREATE ${definition.unique ? "UNIQUE " : ""}INDEX IF NOT EXISTS ${idxName} ON ${this.table} (${cols.join(",")})`);
+
+    this.schema = evolved as unknown as TableSchema<Columns>;
+    this.database.prepare("UPDATE kvdb_schema_registry SET schema_json = ? WHERE logical_name = ?").run(
+      JSON.stringify(this.schema),
+      this.logicalName,
+    );
   }
 }
 
 function validateQueryColumns(node: QueryNode, schema: TableSchema): void {
+  const norm = normalizeTableSchema(schema);
+  validateQueryColumnsInner(node, norm);
+}
+
+function validateQueryColumnsInner(node: QueryNode, schema: NormalizedSchema): void {
   if (node.kind === "cmp" || node.kind === "exists" || node.kind === "elemMatch") {
-    if (node.path.sourceKind === "column" && !(node.path.source in schema.columns)) throw new KvdbConfigError(`Unknown schema column: ${node.path.source}`);
-    if (node.kind === "elemMatch") validateQueryColumns(node.child, schema);
+    if (node.path.sourceKind === "column") {
+      const col = node.path.source;
+      if (col !== schema.primaryKey.name && !(col in schema.keys)) {
+        throw new KvdbConfigError(`Unknown schema column: ${col}`);
+      }
+    }
+    if (node.kind === "elemMatch") validateQueryColumnsInner(node.child, schema);
     return;
   }
-  if (node.kind === "and" || node.kind === "or" || node.kind === "nor") for (const child of node.children) validateQueryColumns(child, schema);
-  if (node.kind === "not") validateQueryColumns(node.child, schema);
+  if (node.kind === "and" || node.kind === "or" || node.kind === "nor") {
+    for (const child of node.children) validateQueryColumnsInner(child, schema);
+  }
+  if (node.kind === "not") validateQueryColumnsInner(node.child, schema);
 }
+
 
 function schemaTableName(name: string): string {
   const safe = name.replace(/[^A-Za-z0-9_]/g, "_");

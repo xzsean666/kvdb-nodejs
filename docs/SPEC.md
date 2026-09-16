@@ -191,40 +191,107 @@ class UserService {
 - 跨 namespace / 跨实例事务。
 - 分布式缓存一致性协议。
 
-## 14. Schema table（真实物理列）
+## 14. 动态多键（Multi-Key）与物理 Schema Table
 
-`db.table<Value, Columns>(name, { schema })` 创建按逻辑名管理的 schema table。首次实际操作创建独立物理 table/collection；后续 `db.table(name)` 从 registry 恢复 schema。无 schema 时仍使用普通 KV table；同名普通 KV 与 schema table 冲突不得静默转换。
+KVDB 支持通过 `db.table<Value, Keys>(name, { schema })` 定义与管理物理 Schema Table。底层在 SQLite、PostgreSQL、MongoDB 中自动创建物理表/集合，将主键与二级键映射为物理字段并挂载原生 B-Tree 索引，兼具 KV 的灵活性与物理关系的索引查询性能。
 
-列类型为 `string | integer | number | boolean | json`，定义支持 `nullable`、`default`、单列 `index`，表级支持联合索引和 `unique`。`key`、`value`、`expires_at`、`created_at`、`updated_at` 为保留字段。非法 identifier、schema 冲突、错类型、缺少 required 列和唯一冲突必须抛可判别错误。
-
+### 14.1 Schema 契约定义
 ```ts
-const blocks = db.table<BlockValue, BlockColumns>("blocks", {
-  schema: {
-    columns: {
-      blocknumber: { type: "integer", nullable: false, index: true },
-      chainId: { type: "string", nullable: false },
-      timestamp: { type: "integer", nullable: true },
-    },
-    indexes: [{ columns: ["chainId", "blocknumber"] }],
-  },
-});
-
-await blocks.set("tx-1", payload, { columns: { blocknumber: 123, chainId: "eth" } });
-const record = await blocks.getRecord("tx-1"); // { key, columns, value }
+interface MultiKeySchema<Keys, PKType> {
+  // 物理主键定义（可选，默认 name: "key", type: "string"；支持 integer 自增/主键）
+  primaryKey?: { name: string; type?: "string" | "integer" };
+  // 二级键（物理列）定义
+  keys: Record<string, {
+    type: "string" | "integer" | "number" | "boolean" | "json";
+    nullable?: boolean;
+    default?: unknown;
+    index?: boolean | { name?: string; unique?: boolean };
+  }>;
+  // 表级复合物理索引
+  indexes?: Array<{
+    name?: string;
+    keys?: string[];
+    columns?: string[];
+    unique?: boolean;
+  }>;
+}
 ```
 
-`get` 仍只返回 `value`。schema 变更必须调用显式 `db.alterTable(name, migration)`；首期允许新增 nullable/兼容 default 列及增删索引，禁止隐式改类型、重命名或删除列。
+- **保留字段**：`value`、`expires_at`、`created_at`、`updated_at`；默认主键名为 `key`（若未自定义）。
+- **兼容性**：`schema.columns` 与 `schema.keys` 互为别名完全等价；无 schema 的表仍为普通 KV 表，同名普通 KV 表与 schema 表禁止冲突。
 
-## 15. Schema 查询
+### 14.2 写入与多键点查
+```ts
+// 方式 1：多键合一写入（当 keys 中包含主键名时）
+await tokens.set({
+  keys: { symbol: "ETH", address: "0x1234", chainId: "ethereum" },
+  value: { name: "Ethereum", decimals: 18 },
+  ttlMs: 3600_000,
+});
+
+// 方式 2：显式主键写入
+await tokens.set("0x1234", { name: "Ethereum", decimals: 18 }, {
+  keys: { symbol: "ETH", chainId: "ethereum" },
+});
+
+// 主键读取（仅返回 Value）
+const val = await tokens.get("0x1234");
+
+// 任意物理二级键高效点查（直接走物理 B-Tree 索引，返回首个匹配项的 Value）
+const token = await tokens.getBy("symbol", "ETH");
+
+// 读取完整物理记录
+const record = await tokens.getRecord("0x1234");
+// record: { key: "0x1234", keys: { symbol: "ETH", chainId: "ethereum" }, value: { ... } }
+```
+
+### 14.3 动态 Key 扩展与物理表自动演进（Zero-Downtime Evolution）
+支持应用在运行期间零停机动态扩展键与索引：
 
 ```ts
-await blocks.find({
+// 1. 动态增加物理键（自动执行 ALTER TABLE ADD COLUMN / 索引创建）
+await tokens.addKey("isL2", {
+  type: "boolean",
+  default: false,
+  index: true,
+});
+
+// 2. 动态创建多列物理复合索引
+await tokens.addIndex({
+  keys: ["chainId", "isL2"],
+  unique: false,
+});
+```
+- **演进幂等**：重复添加同名 key 或同名/同列索引幂等安全，不抛异常。
+
+---
+
+## 15. 动态多键与 Schema 查询
+
+### 15.1 智能物理列路由
+在 `table.find` 查询中，顶层 `where` 条件会自动识别已声明的物理主键与二级键。如果字段属于物理列，查询编译器自动将其编译为列级原生比较（例如 SQL 的 `symbol = ?`，Mongo 的顶层 `{ symbol: "..." }`），直接命中 B-Tree 物理索引；未声明的字段则降级为 JSON 字段路径提取。
+
+```ts
+// 直连多键查询（全量走物理索引）
+const list = await tokens.find({
   where: {
-    columns: { blocknumber: { $gte: 10000 }, chainId: "eth" },
-    value: { "receipt.status": 1 },
+    chainId: "ethereum",
+    isL2: false,
   },
-  sort: [{ source: "column", path: "blocknumber", direction: "desc" }],
+  sort: [{ path: "symbol", dir: "asc" }],
+  limit: 20,
 });
 ```
 
-`where.columns` 查询真实列，`where.value` 查询 value JSON；旧的 dotted value path 保持兼容。columns/value 可混合组合，统一支持既有操作符、排序、分页和 TTL 语义。
+### 15.2 显式命名空间查询（高级混合查询）
+亦支持通过 `columns` (或 `keys`) 与 `value` 进行混合过滤：
+```ts
+await tokens.find({
+  where: {
+    columns: { chainId: "ethereum" },            // 物理列过滤
+    value: { "metrics.holders": { $gt: 1000 } }, // JSON 内部字段过滤
+  },
+  sort: [{ source: "column", path: "symbol", direction: "asc" }],
+});
+```
+

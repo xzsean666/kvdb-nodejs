@@ -129,6 +129,7 @@ KVDB_TEST_MONGO_URL="mongodb://localhost:27017/kvdb_test"
 
 ## 8. 最小使用示例(目标 API)
 
+### 8.1 基础 KV 示例
 ```ts
 import { KVDB } from "kvdb-sdk";
 
@@ -142,28 +143,62 @@ const adults = await users.find({ where: { "profile.age": { $gt: 18 } } });
 await db.close();
 ```
 
-Schema table 示例：
-
+### 8.2 动态多键（Multi-Key）物理表示例
 ```ts
-const blocks = db.table("blocks", {
-  schema: { columns: { blocknumber: { type: "integer", nullable: false } } },
+const tokens = db.table("tokens", {
+  schema: {
+    primaryKey: { name: "address", type: "string" },
+    keys: {
+      symbol: { type: "string", index: true },
+      chainId: { type: "string", index: true },
+    },
+    indexes: [{ keys: ["chainId", "symbol"] }],
+  },
 });
-await blocks.set("b1", { hash: "..." }, { columns: { blocknumber: 1 } });
-```
 
-物理表合规测试覆盖真实列/字段、registry 重开、索引、迁移和 columns/value 混合查询。SQLite 可直接运行；PostgreSQL/MongoDB 需设置 `KVDB_TEST_PG_URL` / `KVDB_TEST_MONGO_URL`：
+// 多键写入与点查
+await tokens.set({
+  keys: { address: "0x123", symbol: "ETH", chainId: "ethereum" },
+  value: { name: "Ether", decimals: 18 },
+});
+const eth = await tokens.getBy("symbol", "ETH");
 
-```bash
-pnpm test:compliance
-pnpm typecheck && pnpm build
+// 动态加键与建索引（零停机演进）
+await tokens.addKey("isL2", { type: "boolean", default: false, index: true });
 ```
 
 ---
 
-## 9. 发布(后续)
+## 9. 运行示例与合规测试
+
+### 9.1 运行实战示例
+KVDB 提供了丰富的完整可执行示例（位于 `examples/` 目录下）：
+```bash
+# 运行全部 16 个示例脚本
+pnpm examples
+
+# 运行特定动态多键实战示例
+pnpm example examples/16-dynamic-multi-keys.ts
+```
+
+### 9.2 跨后端合规测试套件
+合规测试覆盖基础 KV 操作与动态多键真实物理表（含自动演进、索引直查、点查与复合索引）：
+```bash
+# 本地 SQLite 合规测试（零配置自包含）
+pnpm test:compliance
+
+# 若测试 PostgreSQL / MongoDB 真实数据库（需提供容器环境）：
+KVDB_TEST_PG_URL="postgres://postgres:dev@localhost:5432/postgres" pnpm test test/compliance/postgres.test.ts
+KVDB_TEST_MONGO_URL="mongodb://localhost:27017/kvdb_test" pnpm test test/compliance/mongodb.test.ts
+```
+
+---
+
+## 10. 发布(后续)
 
 ```bash
 pnpm build && pnpm test && pnpm test:compliance
 # 版本与变更日志策略(changesets)在进入发布阶段时定稿
 ```
 ❗ 任何发布/推送动作需用户显式批准。
+

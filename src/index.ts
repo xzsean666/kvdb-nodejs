@@ -1,12 +1,13 @@
 // kvdb-sdk — public entry point.
 //
-// Exports grow as modules land (see docs/nextsession.md backlog). Keeping this
+// Exports grow as modules land (see docs/AI/TASK_INDEX.md backlog). Keeping this
 // file as the single public surface is a deliberate "clear entry point"
 // decision (AGENTS.md §2.8, docs/ARCHITECTURE.md).
 
 // Core — the main entry objects (docs/SPEC.md §2-6).
 export { KVDB } from "./core/kvdb.js";
-export type { KVDBOptions, KVDBDriverName, TableOptions } from "./core/kvdb.js";
+export type { KVDBOptions, KVDBDriverName, TableOptions, AlterTableOptions } from "./core/kvdb.js";
+
 export { Table } from "./core/table.js";
 export type { FindQuery, SetOptions } from "./core/table.js";
 
@@ -83,6 +84,36 @@ export {
 } from "./core/errors.js";
 export type { KvdbErrorCode } from "./core/errors.js";
 
-// Shared value types.
+// Shared value and schema types.
 export type { JsonValue, JsonObject, JsonPrimitive, MaybePromise } from "./types/json.js";
-export type { PhysicalColumnType, ColumnDefinition, ColumnIndexOptions, TableIndexDefinition, TableSchema, PhysicalRecord } from "./core/table-schema.js";
+export type {
+  KeyType,
+  PrimaryKeyType,
+  PhysicalColumnType,
+  KeyDefinition,
+  ColumnDefinition,
+  KeyIndexOptions,
+  ColumnIndexOptions,
+  PrimaryKeyDefinition,
+  TableIndexDefinition,
+  MultiKeyIndexDefinition,
+  MultiKeySchema,
+  TableSchema,
+  PhysicalRecord,
+  InferKeyType,
+  InferPrimaryKeyType,
+  InferKeysRecord,
+  NormalizedSchema,
+} from "./core/table-schema.js";
+export {
+  normalizeTableSchema,
+  validateMultiKeySchema,
+  validateTableSchema,
+  validateKeyValues,
+  validateColumnValues,
+  schemasEqual,
+  evolveSchemaAddKey,
+  evolveSchemaAddIndex,
+} from "./core/table-schema.js";
+
+

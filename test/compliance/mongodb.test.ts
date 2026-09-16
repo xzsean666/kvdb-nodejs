@@ -6,12 +6,16 @@
 
 import { describe } from "vitest";
 import { describeDriverCompliance } from "./driver-compliance.js";
+import { describeMultiKeyCompliance } from "./multikey-compliance.js";
 import { MongoDriverFactory } from "../../src/drivers/mongodb/mongodb-driver.js";
 
 const url = process.env.KVDB_TEST_MONGO_URL;
 
 if (url) {
   describeDriverCompliance("mongodb", () =>
+    new MongoDriverFactory({ url, collection: "kvdb_compliance" }).connect(),
+  );
+  describeMultiKeyCompliance("mongodb", () =>
     new MongoDriverFactory({ url, collection: "kvdb_compliance" }).connect(),
   );
 } else {

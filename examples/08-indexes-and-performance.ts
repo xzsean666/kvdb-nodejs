@@ -44,8 +44,8 @@ interface Member {
 const members = db.table<Member>("members");
 await members.clear();
 
-// Seed a few thousand rows so an index actually matters.
-const batch = Array.from({ length: 3000 }, (_, i) => ({
+// Seed a few hundred rows so an index actually matters.
+const batch = Array.from({ length: 500 }, (_, i) => ({
   key: `m${i}`,
   value: { name: `member-${i}`, profile: { age: 18 + (i % 60) } },
 }));
@@ -58,7 +58,7 @@ console.log("age >= 70 count:", seniors.length);
 
 // Add another index on demand.
 await members.ensureIndex("name");
-const ann = await members.find({ where: { name: "member-1234" } });
+const ann = await members.find({ where: { name: "member-123" } });
 console.log("by name:", ann[0]?.key);
 
 // If you let the SDK auto-index, a path gets an index after `threshold` queries:

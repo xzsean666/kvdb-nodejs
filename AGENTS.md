@@ -1,7 +1,7 @@
 # AGENTS.md — KVDB SDK 的 AI 工作守则
 
-> 本文件是 AI 在本项目中工作的**唯一入口与最高规范**。任何 AI 会话开始前必须先读本文件,
-> 再读 `docs/nextsession.md`(当前进度),然后才开始工作。
+> 本文件是 AI 在本项目中工作的**入口与最高规则规范**。任何 AI 会话开始前必须先读本文件、
+> `docs/AI_AGENT_PROMPT.md`(开发提示词与原则)以及 `docs/AI/SESSION_STATE.md`(当前会话状态)，然后再读目标任务文件开始工作。
 >
 > 核心理念:**为 AI 的可理解性而优化,而非为人类的优雅而优化。**
 > 目标是让 AI 能在有限上下文内可靠地理解、修改、扩展本系统,并跨多次会话稳定演进。
@@ -17,13 +17,23 @@ KVDB SDK 是一个面向 Node.js 的**高性能、多驱动、可扩展**的 KV 
 
 ---
 
-## 1. 执行协议(严格)
+## 1. 事实来源与执行协议
+
+### 事实来源 (Source of Truth)
+以下文件是项目工作的事实来源：
+- **项目规则**：`AGENTS.md`（本文件）、`docs/AI_AGENT_PROMPT.md`
+- **总目标**：`docs/AI/GOAL.md`
+- **任务索引**：`docs/AI/TASK_INDEX.md`
+- **当前状态**：`docs/AI/SESSION_STATE.md`
+- **当前任务**：`docs/AI/tasks/TASK-xxx.md`
+- **架构说明**：`docs/AI/ARCHITECTURE.md`（详尽架构见 `docs/ARCHITECTURE.md`）
+- **重要决策**：`docs/AI/DECISIONS.md`
 
 每开始任何一步之前,AI **必须**:
 
-1. **明确声明当前处于哪一步**
+1. **明确声明当前处于哪一步及当前 Task**
 2. **说明本步将产出什么**
-3. **严格按下面的步骤顺序执行**
+3. **严格按流程顺序执行**
 
 ### 步骤工作流
 
@@ -31,10 +41,10 @@ KVDB SDK 是一个面向 Node.js 的**高性能、多驱动、可扩展**的 KV 
 |---|---|---|---|
 | Step 1 | 架构设计(强制最先) | 系统架构 / 模块拆分 / 数据流 / 关键决策 | ❌ 否 |
 | Step 2 | 文档 | `docs/SPEC.md` / `docs/BUILD.md` | ❌ 否 |
-| Step 3 | 上下文交接 | `docs/nextsession.md` | ❌ 否 |
+| Step 3 | 上下文交接 | `docs/AI/SESSION_STATE.md` | ❌ 否 |
 | Step 4 | 实现 | 代码、模块 | ✅ 仅在用户显式批准后 |
 
-> 当前状态:**Step 1–3 已完成,等待用户批准进入 Step 4。** 见 `docs/nextsession.md`。
+> 当前状态: **Milestone 1 已完成；Milestone 2 (真实物理列表升级) 部分完成，待进一步审查与继续推进。** 详见 `docs/AI/SESSION_STATE.md` 与 `docs/AI/TASK_INDEX.md`。
 
 ### 自我纠正规则
 
@@ -107,11 +117,16 @@ git commit -m "feat: <描述当前步骤>"
 
 | 我想知道… | 看这个文件 |
 |---|---|
-| 怎么和 AI 协作 / 协议 / 原则 | `AGENTS.md`(本文件) |
-| 系统架构、模块边界、数据流、关键技术决策 | `docs/ARCHITECTURE.md` |
+| AI 开发提示词、12原则与标准化规范 | `docs/AI_AGENT_PROMPT.md` |
+| 怎么和 AI 协作 / 协议 / 本地执行准则 | `AGENTS.md`(本文件) |
+| 当前全局目标与演化路线 | `docs/AI/GOAL.md` |
+| 全局任务索引与依赖流转 | `docs/AI/TASK_INDEX.md` |
+| 当前会话状态、未解决问题、下一步 | `docs/AI/SESSION_STATE.md` |
+| 细粒度任务规格与验收要求 | `docs/AI/tasks/TASK-xxx.md` |
+| 系统架构概览、模块边界、数据流 | `docs/AI/ARCHITECTURE.md` 与 `docs/ARCHITECTURE.md` |
+| 核心架构与设计决策记录 (ADR) | `docs/AI/DECISIONS.md` |
 | 公开 API、数据模型、契约、行为规格 | `docs/SPEC.md` |
 | 怎么构建、安装、运行、测试 | `docs/BUILD.md` |
-| 当前进度、已完成、下一步、风险 | `docs/nextsession.md` |
 | 依赖/对接项目的官方文档地址 | `docs/EXTERNAL-DOCS.md` |
 
 ---
@@ -124,4 +139,4 @@ git commit -m "feat: <描述当前步骤>"
 - 装饰器:**TC39 标准装饰器**(TS 5.x 原生),**不**用 `experimentalDecorators`。
 - SQLite 后端:现阶段用 `better-sqlite3`;`node:sqlite`(2026 仍为 RC)作为版本门控的可选适配器。
 
-> 任何会改变上述基线的决定,必须先更新本节并在 `docs/nextsession.md` 记录理由。
+> 任何会改变上述基线的决定,必须先更新本节并在 `docs/AI/DECISIONS.md` 记录理由。

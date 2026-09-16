@@ -20,7 +20,14 @@ import type { Plugin } from "../plugins/types.js";
 import { AutoIndexManager } from "./auto-index.js";
 import type { JsonValue } from "../types/json.js";
 import { KvdbConfigError } from "./errors.js";
-import type { TableSchema } from "./table-schema.js";
+import type {
+  TableSchema,
+  MultiKeySchema,
+  KeyDefinition,
+  TableIndexDefinition,
+  MultiKeyIndexDefinition,
+} from "./table-schema.js";
+
 
 /** Driver names accepted in config (mirrors docs/SPEC.md and the README). */
 export type KVDBDriverName = "sqlite" | "postgresql" | "mongodb";
@@ -56,10 +63,15 @@ export interface KVDBOptions {
   ttlCleanupIntervalMs?: number;
 }
 
-export interface TableOptions {
+export interface TableOptions<Columns extends Record<string, unknown> = Record<string, unknown>> {
   /** Per-table cache; overrides the instance cache for this namespace. */
   cache?: CacheOptions | Cache;
-  schema?: TableSchema;
+  schema?: TableSchema<Columns> | MultiKeySchema<Columns> | TableSchema<any> | MultiKeySchema<any>;
+}
+
+export interface AlterTableOptions {
+  addKeys?: Record<string, KeyDefinition>;
+  addIndexes?: (TableIndexDefinition | MultiKeyIndexDefinition)[];
 }
 
 export class KVDB {
@@ -83,7 +95,10 @@ export class KVDB {
   }
 
   /** Create a namespaced Table. Values are typed via the `Value` parameter. */
-  table<Value = JsonValue, Columns extends Record<string, unknown> = Record<string, unknown>>(namespace: string, options: TableOptions = {}): Table<Value, Columns> {
+  table<Value = JsonValue, Columns extends Record<string, unknown> = Record<string, unknown>>(
+    namespace: string,
+    options: TableOptions<Columns> = {},
+  ): Table<Value, Columns> {
     const cache = options.cache ? toCache(options.cache) : this.cache;
     return new Table<Value, Columns>({
       getDriver: () => this.getDriver(),
@@ -96,8 +111,20 @@ export class KVDB {
     });
   }
 
+  /** Dynamically alter an existing schema table: add keys and/or indexes. */
+  async alterTable(namespace: string, options: AlterTableOptions): Promise<void> {
+    const tbl = this.table(namespace);
+    for (const [name, def] of Object.entries(options.addKeys ?? {})) {
+      await tbl.addKey(name, def);
+    }
+    for (const idx of options.addIndexes ?? []) {
+      await tbl.addIndex(idx);
+    }
+  }
+
   /** Delete all currently-expired entries across the backend; returns the count. */
   async purgeExpired(): Promise<number> {
+
     return (await this.getDriver()).purgeExpired();
   }
 

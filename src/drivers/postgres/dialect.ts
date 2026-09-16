@@ -22,6 +22,20 @@ export class PostgresDialect implements SqlDialect {
   constructor(private readonly column: string = "value") {}
 
   scalarAt(path: FieldPath, valueHint?: JsonValue): string {
+    if (path.sourceKind === "column") {
+      const col = quoteIdentifier(path.source);
+      if (path.segments.length === 0) return col;
+      const json = `'{${pathArray(path)}}'`;
+      const text = `((${col})::jsonb #>> ${json})`;
+      switch (typeof valueHint) {
+        case "number":
+          return this.typedCastColumn(col, json, text, "number", "numeric");
+        case "boolean":
+          return this.typedCastColumn(col, json, text, "boolean", "boolean");
+        default:
+          return text;
+      }
+    }
     const json = `'{${pathArray(path)}}'`;
     const text = `((${this.column})::jsonb #>> ${json})`;
     switch (typeof valueHint) {
@@ -43,9 +57,20 @@ export class PostgresDialect implements SqlDialect {
     return `(CASE WHEN ${typeof_} = '${jsonType}' THEN (${text})::${sqlType} END)`;
   }
 
+  private typedCastColumn(col: string, json: string, text: string, jsonType: string, sqlType: string): string {
+    const typeof_ = `jsonb_typeof((${col})::jsonb #> ${json})`;
+    return `(CASE WHEN ${typeof_} = '${jsonType}' THEN (${text})::${sqlType} END)`;
+  }
+
   pathExists(path: FieldPath): string {
+    if (path.sourceKind === "column") {
+      const col = quoteIdentifier(path.source);
+      if (path.segments.length === 0) return `${col} IS NOT NULL`;
+      return `jsonb_extract_path((${col})::jsonb, ${pathLiterals(path)}) IS NOT NULL`;
+    }
     return `jsonb_extract_path((${this.column})::jsonb, ${pathLiterals(path)}) IS NOT NULL`;
   }
+
 
   placeholder(position: number): string {
     return `$${position + 1}`;
@@ -71,4 +96,9 @@ function pathLiterals(path: FieldPath): string {
       "index" in segment ? `'${segment.index}'` : `'${segment.key.replace(/'/g, "''")}'`,
     )
     .join(", ");
+}
+
+function quoteIdentifier(value: string): string {
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(value)) throw new Error(`Invalid identifier: ${value}`);
+  return `"${value}"`;
 }

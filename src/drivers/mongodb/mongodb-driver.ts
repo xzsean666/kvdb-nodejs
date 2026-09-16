@@ -16,6 +16,7 @@ import type {
   DriverCapabilities,
   ProviderName,
   UpdateMutator,
+  SchemaTableDriver,
 } from "../types.js";
 import type { KVEntry, RawEntry } from "../../cache/types.js";
 import type { QueryNode, FindOptions } from "../../query/ast.js";
@@ -23,6 +24,20 @@ import { compileMongoFilter, compileMongoSort } from "./compiler.js";
 import { expiresAtFromTtl } from "../../core/expiry.js";
 import { deserialize } from "../../core/serializer.js";
 import { KvdbConfigError, KvdbConnectionError } from "../../core/errors.js";
+import type {
+  TableSchema,
+  MultiKeySchema,
+  KeyDefinition,
+  TableIndexDefinition,
+  MultiKeyIndexDefinition,
+} from "../../core/table-schema.js";
+import {
+  normalizeTableSchema,
+  validateMultiKeySchema,
+  evolveSchemaAddKey,
+  evolveSchemaAddIndex,
+  schemasEqual,
+} from "../../core/table-schema.js";
 
 const PROVIDER: ProviderName = "mongodb";
 
@@ -42,6 +57,16 @@ interface KvDocument {
   value: string;
   doc: unknown;
   expiresAt: number | null;
+}
+
+interface SchemaDocument {
+  _id: string | number;
+  value: string;
+  doc: unknown;
+  expiresAt: number | null;
+  createdAt: number;
+  updatedAt: number;
+  [key: string]: unknown;
 }
 
 export interface MongoDriverOptions {
@@ -86,7 +111,7 @@ export class MongoDriverFactory implements DriverFactory {
   }
 }
 
-class MongoDriver implements Driver {
+export class MongoDriver implements Driver {
   readonly provider = PROVIDER;
   readonly capabilities = CAPABILITIES;
 
@@ -267,9 +292,256 @@ class MongoDriver implements Driver {
     return this.db;
   }
 
+  async openSchemaTable<Columns extends Record<string, unknown>>(
+    name: string,
+    schema?: TableSchema<Columns> | MultiKeySchema<Columns>,
+  ): Promise<SchemaTableDriver<unknown, Columns> | undefined> {
+    const registry = this.db.collection<{ _id: string; schema_json: string }>("kvdb_schema_registry");
+    const existing = await registry.findOne({ _id: name });
+    if (existing && schema && !schemasEqual(JSON.parse(existing.schema_json) as TableSchema, schema)) {
+      throw new KvdbConfigError(`Schema conflict for table ${name}`);
+    }
+    const resolved = (schema ?? (existing ? JSON.parse(existing.schema_json) : undefined)) as TableSchema<Columns> | undefined;
+    if (!resolved) return undefined;
+    validateMultiKeySchema(resolved);
+    const norm = normalizeTableSchema(resolved);
+    const collName = schemaCollectionName(name);
+    const collection = this.db.collection<SchemaDocument>(collName);
+
+    if (!existing) {
+      await registry.updateOne(
+        { _id: name },
+        { $setOnInsert: { schema_json: JSON.stringify(resolved) } },
+        { upsert: true },
+      );
+
+      for (const [column, definition] of Object.entries(norm.keys)) {
+        if (definition.index) {
+          const idxOpts = typeof definition.index === "object" ? definition.index : {};
+          const idxName = idxOpts.name ?? `${collName}_${column}_idx`;
+          await collection.createIndex(
+            { [column]: 1 },
+            {
+              unique: Boolean(idxOpts.unique),
+              name: idxName,
+            },
+          );
+        }
+      }
+
+      for (const index of norm.indexes) {
+        const idxName = index.name ?? `${collName}_${index.keys.join("_")}_idx`;
+        const indexSpec = Object.fromEntries(index.keys.map((k) => [k, 1]));
+        await collection.createIndex(
+          indexSpec,
+          {
+            unique: Boolean(index.unique),
+            name: idxName,
+          },
+        );
+      }
+
+      await collection.createIndex({ expiresAt: 1 }, { name: `${collName}_expiresAt_idx` });
+    }
+
+    return new MongoSchemaTable(this.db, collection, registry, collName, name, resolved);
+  }
+
   async close(): Promise<void> {
     await this.client.close();
   }
+}
+
+class MongoSchemaTable<Columns extends Record<string, unknown>> implements SchemaTableDriver<unknown, Columns> {
+  schema: TableSchema<Columns>;
+
+  constructor(
+    private readonly db: Db,
+    private readonly collection: Collection<SchemaDocument>,
+    private readonly registry: Collection<{ _id: string; schema_json: string }>,
+    private readonly physicalName: string,
+    private readonly logicalName: string,
+    schema: TableSchema<Columns>,
+  ) {
+    this.schema = schema;
+  }
+
+  private get pkName(): string {
+    return this.schema.primaryKey?.name ?? "key";
+  }
+
+  private get secondaryKeys(): Record<string, KeyDefinition> {
+    return (this.schema.keys ?? this.schema.columns ?? {}) as Record<string, KeyDefinition>;
+  }
+
+  async setRecord(key: string | number, value: string, columns: Record<string, unknown>, ttlMs?: number): Promise<void> {
+    const pk = this.pkName;
+    const now = Date.now();
+    const docToSet: Record<string, unknown> = {
+      _id: key,
+      value,
+      doc: deserialize(value),
+      expiresAt: expiresAtFromTtl(ttlMs, now) ?? null,
+      updatedAt: now,
+    };
+    if (pk !== "_id") {
+      docToSet[pk] = key;
+    }
+
+    for (const [name, def] of Object.entries(this.secondaryKeys)) {
+      const val = columns[name];
+      if (val === undefined) {
+        docToSet[name] = def.default !== undefined ? def.default : null;
+      } else {
+        docToSet[name] = val;
+      }
+    }
+
+    await this.collection.updateOne(
+      { _id: key as any },
+      {
+        $set: docToSet,
+        $setOnInsert: { createdAt: now },
+      },
+      { upsert: true },
+    );
+  }
+
+  async getRecord(key: string | number): Promise<{ key: string | number; value: string; columns: Record<string, unknown>; expiresAt?: number } | undefined> {
+    const doc = await this.collection.findOne({ _id: key as any });
+    if (!doc) return undefined;
+    const expiresAt = (doc.expiresAt as number | null) ?? undefined;
+    if (expiresAt !== undefined && expiresAt <= Date.now()) {
+      await this.delete(key);
+      return undefined;
+    }
+    return {
+      key: this.parsePk(doc._id),
+      value: doc.value as string,
+      columns: this.extractColumns(doc),
+      expiresAt,
+    };
+  }
+
+  async getRecordByKey(keyName: string, keyValue: unknown): Promise<{ key: string | number; value: string; columns: Record<string, unknown>; expiresAt?: number } | undefined> {
+    const query = (keyName === this.pkName || keyName === "_id")
+      ? { _id: keyValue as any }
+      : { [keyName]: keyValue };
+    const doc = await this.collection.findOne(query as any);
+    if (!doc) return undefined;
+    const expiresAt = (doc.expiresAt as number | null) ?? undefined;
+    if (expiresAt !== undefined && expiresAt <= Date.now()) {
+      await this.delete(doc._id as unknown as string | number);
+      return undefined;
+    }
+    return {
+      key: this.parsePk(doc._id),
+      value: doc.value as string,
+      columns: this.extractColumns(doc),
+      expiresAt,
+    };
+  }
+
+  async delete(key: string | number): Promise<boolean> {
+    return (await this.collection.deleteOne({ _id: key as any })).deletedCount > 0;
+  }
+
+  async clear(): Promise<void> {
+    await this.collection.deleteMany({});
+  }
+
+  async find(where: QueryNode, options: FindOptions = {}): Promise<Array<{ key: string | number; value: string; columns: Record<string, unknown> }>> {
+    const now = Date.now();
+    const conditions: Record<string, unknown>[] = [
+      { $or: [{ expiresAt: null }, { expiresAt: { $gt: now } }] },
+      compileMongoFilter(where),
+    ];
+    const filter = { $and: conditions };
+    let cursor = this.collection.find(filter);
+    if (options.sort && options.sort.length > 0) cursor = cursor.sort(compileMongoSort(options.sort));
+    if (options.offset !== undefined) cursor = cursor.skip(options.offset);
+    if (options.limit !== undefined) cursor = cursor.limit(options.limit);
+    const docs = await cursor.toArray();
+    return docs.map((doc) => ({
+      key: this.parsePk(doc._id),
+      value: doc.value as string,
+      columns: this.extractColumns(doc),
+    }));
+  }
+
+  async addKey(name: string, definition: KeyDefinition): Promise<void> {
+    const evolved = evolveSchemaAddKey(this.schema, name, definition);
+    if (schemasEqual(this.schema, evolved)) return;
+
+    if (definition.index) {
+      const idxOpts = typeof definition.index === "object" ? definition.index : {};
+      const idxName = idxOpts.name ?? `${this.physicalName}_${name}_idx`;
+      await this.collection.createIndex(
+        { [name]: 1 },
+        { unique: Boolean(idxOpts.unique), name: idxName },
+      );
+    }
+
+    this.schema = evolved as unknown as TableSchema<Columns>;
+    await this.registry.updateOne(
+      { _id: this.logicalName },
+      { $set: { schema_json: JSON.stringify(this.schema) } },
+      { upsert: true },
+    );
+  }
+
+  async addIndex(definition: TableIndexDefinition | MultiKeyIndexDefinition): Promise<void> {
+    const evolved = evolveSchemaAddIndex(this.schema, definition);
+    if (schemasEqual(this.schema, evolved)) return;
+
+    const cols = definition.keys ?? definition.columns ?? [];
+    const idxName = definition.name ?? `${this.physicalName}_${cols.join("_")}_idx`;
+    const indexSpec = Object.fromEntries(cols.map((k) => [k, 1]));
+    await this.collection.createIndex(
+      indexSpec,
+      { unique: Boolean(definition.unique), name: idxName },
+    );
+
+    this.schema = evolved as unknown as TableSchema<Columns>;
+    await this.registry.updateOne(
+      { _id: this.logicalName },
+      { $set: { schema_json: JSON.stringify(this.schema) } },
+      { upsert: true },
+    );
+  }
+
+  private parsePk(val: unknown): string | number {
+    const pkType = this.schema.primaryKey?.type ?? "string";
+    return pkType === "integer" ? Number(val) : String(val);
+  }
+
+  private extractColumns(doc: Record<string, unknown>): Record<string, unknown> {
+    const columns: Record<string, unknown> = {};
+    for (const [name, definition] of Object.entries(this.secondaryKeys)) {
+      const raw = doc[name];
+      if (raw === undefined || raw === null) {
+        columns[name] = null;
+      } else if (definition.type === "integer" || definition.type === "number") {
+        columns[name] = Number(raw);
+      } else if (definition.type === "boolean") {
+        columns[name] = Boolean(raw);
+      } else {
+        columns[name] = raw;
+      }
+    }
+    return columns;
+  }
+}
+
+function schemaCollectionName(name: string): string {
+  const safe = name.replace(/[^A-Za-z0-9_]/g, "_");
+  return `kvdb_schema_${safe}_${simpleHash(name)}`;
+}
+
+function simpleHash(value: string): string {
+  let hash = 0;
+  for (const char of value) hash = (hash * 31 + char.charCodeAt(0)) >>> 0;
+  return hash.toString(36);
 }
 
 /** Escape a literal prefix for use inside a Mongo $regex anchor. */

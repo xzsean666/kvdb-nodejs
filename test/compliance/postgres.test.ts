@@ -6,12 +6,16 @@
 
 import { describe } from "vitest";
 import { describeDriverCompliance } from "./driver-compliance.js";
+import { describeMultiKeyCompliance } from "./multikey-compliance.js";
 import { PostgresDriverFactory } from "../../src/drivers/postgres/postgres-driver.js";
 
 const url = process.env.KVDB_TEST_PG_URL;
 
 if (url) {
   describeDriverCompliance("postgres", () =>
+    new PostgresDriverFactory({ url, table: "kvdb_compliance" }).connect(),
+  );
+  describeMultiKeyCompliance("postgres", () =>
     new PostgresDriverFactory({ url, table: "kvdb_compliance" }).connect(),
   );
 } else {

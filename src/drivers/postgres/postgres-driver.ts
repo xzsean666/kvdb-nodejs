@@ -15,6 +15,7 @@ import type {
   DriverCapabilities,
   ProviderName,
   UpdateMutator,
+  SchemaTableDriver,
 } from "../types.js";
 import type { KVEntry, RawEntry } from "../../cache/types.js";
 import type { QueryNode, FindOptions } from "../../query/ast.js";
@@ -23,6 +24,22 @@ import { parsePath } from "../../query/parser.js";
 import { PostgresDialect } from "./dialect.js";
 import { expiresAtFromTtl } from "../../core/expiry.js";
 import { KvdbConfigError, KvdbConnectionError } from "../../core/errors.js";
+import {
+  validateTableSchema,
+  schemasEqual,
+  evolveSchemaAddKey,
+  evolveSchemaAddIndex,
+  normalizeTableSchema,
+} from "../../core/table-schema.js";
+import type {
+  TableSchema,
+  MultiKeySchema,
+  KeyDefinition,
+  TableIndexDefinition,
+  MultiKeyIndexDefinition,
+  NormalizedSchema,
+} from "../../core/table-schema.js";
+
 
 const PROVIDER: ProviderName = "postgres";
 
@@ -92,7 +109,8 @@ export class PostgresDriverFactory implements DriverFactory {
   }
 }
 
-class PostgresDriver implements Driver {
+export class PostgresDriver implements Driver {
+
   readonly provider = PROVIDER;
   readonly capabilities = CAPABILITIES;
   private readonly dialect = new PostgresDialect("value");
@@ -304,6 +322,64 @@ class PostgresDriver implements Driver {
     return result.rowCount ?? 0;
   }
 
+  async openSchemaTable<Columns extends Record<string, unknown>>(
+    name: string,
+    schema?: TableSchema<Columns> | MultiKeySchema<Columns>,
+  ): Promise<SchemaTableDriver<unknown, Columns> | undefined> {
+    await this.pool.query(
+      "CREATE TABLE IF NOT EXISTS kvdb_schema_registry (logical_name TEXT PRIMARY KEY, schema_json TEXT NOT NULL)",
+    );
+    const existingResult = await this.pool.query<{ schema_json: string }>(
+      "SELECT schema_json FROM kvdb_schema_registry WHERE logical_name = $1",
+      [name],
+    );
+    const existing = existingResult.rows[0];
+    if (existing && schema && !schemasEqual(JSON.parse(existing.schema_json) as TableSchema, schema)) {
+      throw new KvdbConfigError(`Schema conflict for table ${name}`);
+    }
+    const resolved = (schema ?? (existing ? JSON.parse(existing.schema_json) : undefined)) as TableSchema<Columns> | undefined;
+    if (!resolved) return undefined;
+    validateTableSchema(resolved);
+    const norm = normalizeTableSchema(resolved);
+    const physical = schemaTableName(name);
+
+    if (!existing) {
+      const pkSql = `"${norm.primaryKey.name}" ${norm.primaryKey.type === "integer" ? "BIGINT PRIMARY KEY" : "TEXT PRIMARY KEY"}`;
+      const definitions = Object.entries(norm.keys)
+        .map(([column, definition]) => `"${column}" ${pgType(definition.type)}${definition.nullable === false ? " NOT NULL" : ""}${definition.default !== undefined ? ` DEFAULT ${pgDefault(definition.default)}` : ""}`)
+        .join(",\n");
+      await this.pool.query(`
+        CREATE TABLE IF NOT EXISTS ${physical} (
+          ${pkSql},
+          ${definitions}${definitions ? "," : ""}
+          value TEXT NOT NULL,
+          expires_at BIGINT,
+          created_at BIGINT NOT NULL,
+          updated_at BIGINT NOT NULL
+        )
+      `);
+      await this.pool.query(`CREATE INDEX IF NOT EXISTS ${physical}_expires_at ON ${physical} (expires_at)`);
+      await this.pool.query(
+        "INSERT INTO kvdb_schema_registry (logical_name, schema_json) VALUES ($1, $2) ON CONFLICT (logical_name) DO NOTHING",
+        [name, JSON.stringify(resolved)],
+      );
+      for (const [column, definition] of Object.entries(norm.keys)) {
+        if (definition.index) {
+          const idxOpts = typeof definition.index === "object" ? definition.index : {};
+          const idxName = idxOpts.name ?? `${physical}_${column}_idx`;
+          await this.pool.query(`CREATE ${idxOpts.unique ? "UNIQUE " : ""}INDEX IF NOT EXISTS "${idxName}" ON ${physical} ("${column}")`);
+        }
+      }
+      for (const index of norm.indexes) {
+        const idxName = index.name ?? `${physical}_${index.keys.join("_")}_idx`;
+        await this.pool.query(
+          `CREATE ${index.unique ? "UNIQUE " : ""}INDEX IF NOT EXISTS "${idxName}" ON ${physical} (${index.keys.map((c) => `"${c}"`).join(", ")})`,
+        );
+      }
+    }
+    return new PostgresSchemaTable(this.pool, physical, name, resolved);
+  }
+
   raw(): Pool {
     return this.pool;
   }
@@ -313,6 +389,277 @@ class PostgresDriver implements Driver {
   }
 }
 
+class PostgresSchemaTable<Columns extends Record<string, unknown>> implements SchemaTableDriver<unknown, Columns> {
+  schema: TableSchema<Columns>;
+
+  constructor(
+    private readonly pool: Pool,
+    private readonly table: string,
+    private readonly logicalName: string,
+    schema: TableSchema<Columns>,
+  ) {
+    this.schema = schema;
+  }
+
+  private get pkName(): string {
+    return this.schema.primaryKey?.name ?? "key";
+  }
+
+  private get secondaryKeys(): Record<string, KeyDefinition> {
+    return (this.schema.keys ?? this.schema.columns ?? {}) as Record<string, KeyDefinition>;
+  }
+
+  async setRecord(key: string | number, value: string, columns: Record<string, unknown>, ttlMs?: number): Promise<void> {
+    const pk = this.pkName;
+    const names = Object.keys(this.secondaryKeys);
+    const now = Date.now();
+    const fields = [pk, ...names, "value", "expires_at", "created_at", "updated_at"];
+    const params: unknown[] = [key];
+
+    for (const name of names) {
+      const val = columns[name];
+      const def = this.secondaryKeys[name]!;
+      if (val === undefined) {
+        params.push(def.default !== undefined ? def.default : null);
+      } else if (def.type === "json") {
+        params.push(JSON.stringify(val));
+      } else {
+        params.push(val);
+      }
+    }
+
+    params.push(value);
+    params.push(expiresAtFromTtl(ttlMs, now) ?? null);
+    params.push(now);
+    params.push(now);
+
+    const placeholders = fields.map((_, i) => `$${i + 1}`).join(", ");
+    const updateClauses = [...names, "value", "expires_at", "updated_at"]
+      .map((field) => `"${field}" = EXCLUDED."${field}"`)
+      .join(", ");
+
+    const sql = `INSERT INTO ${this.table} (${fields.map((f) => `"${f}"`).join(", ")})
+      VALUES (${placeholders})
+      ON CONFLICT ("${pk}") DO UPDATE SET ${updateClauses}`;
+
+    await this.pool.query(sql, params);
+  }
+
+  async getRecord(key: string | number): Promise<{ key: string | number; value: string; columns: Record<string, unknown>; expiresAt?: number } | undefined> {
+    const pk = this.pkName;
+    const result = await this.pool.query<Record<string, unknown>>(
+      `SELECT * FROM ${this.table} WHERE "${pk}" = $1`,
+      [key],
+    );
+    const row = result.rows[0];
+    if (!row) return undefined;
+
+    const expiry = row.expires_at === null ? null : Number(row.expires_at);
+    if (expiry !== null && expiry <= Date.now()) {
+      await this.delete(key);
+      return undefined;
+    }
+
+    return {
+      key: this.parsePk(row[pk]),
+      value: row.value as string,
+      columns: this.parseColumns(row),
+      expiresAt: expiry ?? undefined,
+    };
+  }
+
+  async getRecordByKey(keyName: string, keyValue: unknown): Promise<{ key: string | number; value: string; columns: Record<string, unknown>; expiresAt?: number } | undefined> {
+    const pk = this.pkName;
+    if (keyName === pk) {
+      return this.getRecord(keyValue as string | number);
+    }
+    const def = this.secondaryKeys[keyName];
+    if (!def) {
+      throw new KvdbConfigError(`Unknown key: ${keyName}`);
+    }
+
+    const param = keyValue === null || keyValue === undefined ? null
+      : def.type === "json" ? JSON.stringify(keyValue)
+      : keyValue;
+
+    const result = await this.pool.query<Record<string, unknown>>(
+      `SELECT * FROM ${this.table} WHERE "${keyName}" = $1`,
+      [param],
+    );
+    const row = result.rows[0];
+    if (!row) return undefined;
+
+    const expiry = row.expires_at === null ? null : Number(row.expires_at);
+    if (expiry !== null && expiry <= Date.now()) {
+      await this.delete(this.parsePk(row[pk]));
+      return undefined;
+    }
+
+    return {
+      key: this.parsePk(row[pk]),
+      value: row.value as string,
+      columns: this.parseColumns(row),
+      expiresAt: expiry ?? undefined,
+    };
+  }
+
+  async delete(key: string | number): Promise<boolean> {
+    const pk = this.pkName;
+    const result = await this.pool.query(
+      `DELETE FROM ${this.table} WHERE "${pk}" = $1`,
+      [key],
+    );
+    return (result.rowCount ?? 0) > 0;
+  }
+
+  async clear(): Promise<void> {
+    await this.pool.query(`DELETE FROM ${this.table}`);
+  }
+
+  async find(where: QueryNode, options: FindOptions = {}): Promise<Array<{ key: string | number; value: string; columns: Record<string, unknown> }>> {
+    validateQueryColumns(where, this.schema);
+    const dialect = new PostgresDialect("value");
+    const compiled = compileWhere(where, dialect);
+    const params: unknown[] = [...compiled.params];
+    const nowIdx = params.push(Date.now());
+
+    let sql = `SELECT * FROM ${this.table} WHERE (expires_at IS NULL OR expires_at > $${nowIdx}) AND (${compiled.sql})`;
+    if (options.sort && options.sort.length > 0) {
+      sql += ` ORDER BY ${compileOrderBy(options.sort, dialect)}`;
+    }
+    if (options.limit !== undefined) sql += ` LIMIT $${params.push(options.limit)}`;
+    if (options.offset !== undefined) sql += ` OFFSET $${params.push(options.offset)}`;
+
+    const result = await this.pool.query<Record<string, unknown>>(sql, params);
+    const pk = this.pkName;
+    return result.rows.map((row) => ({
+      key: this.parsePk(row[pk]),
+      value: row.value as string,
+      columns: this.parseColumns(row),
+    }));
+  }
+
+  async addKey(name: string, definition: KeyDefinition): Promise<void> {
+    const evolved = evolveSchemaAddKey(this.schema, name, definition);
+    if (schemasEqual(this.schema, evolved)) return;
+
+    const colSql = `"${name}" ${pgType(definition.type)}${definition.nullable === false ? " NOT NULL" : ""}${definition.default !== undefined ? ` DEFAULT ${pgDefault(definition.default)}` : ""}`;
+    await this.pool.query(`ALTER TABLE ${this.table} ADD COLUMN IF NOT EXISTS ${colSql}`);
+
+    if (definition.index) {
+      const idxOpts = typeof definition.index === "object" ? definition.index : {};
+      const idxName = idxOpts.name ?? `${this.table}_${name}_idx`;
+      await this.pool.query(`CREATE ${idxOpts.unique ? "UNIQUE " : ""}INDEX IF NOT EXISTS "${idxName}" ON ${this.table} ("${name}")`);
+    }
+
+    this.schema = evolved as unknown as TableSchema<Columns>;
+    await this.pool.query(
+      "UPDATE kvdb_schema_registry SET schema_json = $1 WHERE logical_name = $2",
+      [JSON.stringify(this.schema), this.logicalName],
+    );
+  }
+
+  async addIndex(definition: TableIndexDefinition | MultiKeyIndexDefinition): Promise<void> {
+    const evolved = evolveSchemaAddIndex(this.schema, definition);
+    if (schemasEqual(this.schema, evolved)) return;
+
+    const cols = definition.keys ?? definition.columns ?? [];
+    const idxName = definition.name ?? `${this.table}_${cols.join("_")}_idx`;
+    await this.pool.query(
+      `CREATE ${definition.unique ? "UNIQUE " : ""}INDEX IF NOT EXISTS "${idxName}" ON ${this.table} (${cols.map((c) => `"${c}"`).join(", ")})`,
+    );
+
+    this.schema = evolved as unknown as TableSchema<Columns>;
+    await this.pool.query(
+      "UPDATE kvdb_schema_registry SET schema_json = $1 WHERE logical_name = $2",
+      [JSON.stringify(this.schema), this.logicalName],
+    );
+  }
+
+  private parsePk(val: unknown): string | number {
+    const pkType = this.schema.primaryKey?.type ?? "string";
+    return pkType === "integer" ? Number(val) : String(val);
+  }
+
+  private parseColumns(row: Record<string, unknown>): Record<string, unknown> {
+    const columns: Record<string, unknown> = {};
+    for (const [name, definition] of Object.entries(this.secondaryKeys)) {
+      const raw = row[name];
+      if (raw === null || raw === undefined) {
+        columns[name] = null;
+      } else if (definition.type === "integer") {
+        columns[name] = Number(raw);
+      } else if (definition.type === "number") {
+        columns[name] = Number(raw);
+      } else if (definition.type === "boolean") {
+        columns[name] = Boolean(raw);
+      } else if (definition.type === "json" && typeof raw === "string") {
+        try {
+          columns[name] = JSON.parse(raw);
+        } catch {
+          columns[name] = raw;
+        }
+      } else {
+        columns[name] = raw;
+      }
+    }
+    return columns;
+  }
+}
+
+function schemaTableName(name: string): string {
+  const safe = name.replace(/[^A-Za-z0-9_]/g, "_");
+  return `kvdb_schema_${safe}_${simpleHash(name)}`;
+}
+
+function simpleHash(value: string): string {
+  let hash = 0;
+  for (const char of value) hash = (hash * 31 + char.charCodeAt(0)) >>> 0;
+  return hash.toString(36);
+}
+
+function pgType(type: string): string {
+  switch (type) {
+    case "integer": return "BIGINT";
+    case "number": return "DOUBLE PRECISION";
+    case "boolean": return "BOOLEAN";
+    case "json": return "JSONB";
+    case "string":
+    default:
+      return "TEXT";
+  }
+}
+
+function pgDefault(value: unknown): string {
+  if (typeof value === "string") return `'${value.replace(/'/g, "''")}'`;
+  if (typeof value === "boolean") return value ? "TRUE" : "FALSE";
+  if (value === null) return "NULL";
+  return String(value);
+}
+
+function validateQueryColumns(node: QueryNode, schema: TableSchema): void {
+  const norm = normalizeTableSchema(schema);
+  validateQueryColumnsInner(node, norm);
+}
+
+function validateQueryColumnsInner(node: QueryNode, schema: NormalizedSchema): void {
+  if (node.kind === "cmp" || node.kind === "exists" || node.kind === "elemMatch") {
+    if (node.path.sourceKind === "column") {
+      const col = node.path.source;
+      if (col !== schema.primaryKey.name && !(col in schema.keys)) {
+        throw new KvdbConfigError(`Unknown schema column: ${col}`);
+      }
+    }
+    if (node.kind === "elemMatch") validateQueryColumnsInner(node.child, schema);
+    return;
+  }
+  if (node.kind === "and" || node.kind === "or" || node.kind === "nor") {
+    for (const child of node.children) validateQueryColumnsInner(child, schema);
+  }
+  if (node.kind === "not") validateQueryColumnsInner(node.child, schema);
+}
+
 function escapeLike(prefix: string): string {
   return prefix.replace(/[\\%_]/g, (char) => `\\${char}`);
 }
+

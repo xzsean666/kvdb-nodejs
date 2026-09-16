@@ -8,7 +8,7 @@ cache system, and decorator-based method caching — fully typed.
 > **Project docs:** start with [`AGENTS.md`](./AGENTS.md), then
 > [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md),
 > [`docs/SPEC.md`](./docs/SPEC.md), [`docs/BUILD.md`](./docs/BUILD.md).
-> Current status / backlog: [`docs/nextsession.md`](./docs/nextsession.md).
+> Current status / backlog: [`docs/AI/SESSION_STATE.md`](./docs/AI/SESSION_STATE.md).
 
 ## Install
 
@@ -35,6 +35,32 @@ const adults = await users.find({ where: { "profile.age": { $gt: 18 } } });
 await db.close();
 ```
 
+## Dynamic Multi-Keys & Native Physical Indexes
+
+```ts
+// Define physical schema with custom primary key and indexed secondary keys
+const tokens = db.table("tokens", {
+  schema: {
+    primaryKey: { name: "address", type: "string" },
+    keys: {
+      symbol: { type: "string", index: true },
+      chainId: { type: "string", index: true },
+    },
+    indexes: [{ keys: ["chainId", "symbol"] }],
+  },
+});
+
+// Multi-key write and fast O(1) point lookup via secondary index
+await tokens.set({
+  keys: { address: "0x123", symbol: "ETH", chainId: "ethereum" },
+  value: { name: "Ether", decimals: 18 },
+});
+const eth = await tokens.getBy("symbol", "ETH");
+
+// Zero-downtime dynamic key extension & B-Tree index creation at runtime
+await tokens.addKey("isL2", { type: "boolean", default: false, index: true });
+```
+
 ## Standalone cache + decorators
 
 ```ts
@@ -57,7 +83,7 @@ class UserService {
 SQLite is covered by unit tests and a real-database compliance suite. The
 PostgreSQL and MongoDB drivers are implemented against the same compliance suite
 but have not yet been run against a live database in CI — see
-[`docs/nextsession.md`](./docs/nextsession.md) for the one-line commands to verify.
+[`docs/AI/SESSION_STATE.md`](./docs/AI/SESSION_STATE.md) for the one-line commands to verify.
 
 ## Development
 
