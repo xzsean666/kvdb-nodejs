@@ -76,27 +76,36 @@ export class Table<Value = JsonValue, Columns extends Record<string, unknown> = 
     return this.deps.scope.namespace;
   }
 
+  private cacheKey(key: string, isSchema: boolean): string {
+    return isSchema
+      ? `schema:${this.deps.schemaName ?? this.namespace}:${key}`
+      : toPhysicalKey(this.deps.scope, key);
+  }
+
+  private schemaDriverPromise: Promise<SchemaTableDriver | undefined> | undefined;
+
   private async schemaDriver(): Promise<SchemaTableDriver | undefined> {
-    if (!this.deps.schemaName) return undefined;
-    const driver = await this.deps.getDriver();
-    if (!driver.openSchemaTable) {
-      if (this.deps.schema) throw new KvdbError("UNSUPPORTED", "Driver does not support physical schema tables");
-      return undefined;
-    }
-    return driver.openSchemaTable(this.deps.schemaName, this.deps.schema);
+    if (this.schemaDriverPromise) return this.schemaDriverPromise;
+    this.schemaDriverPromise = (async () => {
+      if (!this.deps.schema && !this.deps.schemaName) return undefined;
+      const driver = await this.deps.getDriver();
+      if (!driver.openSchemaTable) {
+        if (this.deps.schema) throw new KvdbError("UNSUPPORTED", "Driver does not support physical schema tables");
+        return undefined;
+      }
+      try {
+        return await driver.openSchemaTable(this.deps.schemaName ?? this.namespace, this.deps.schema);
+      } catch {
+        return undefined;
+      }
+    })();
+    return this.schemaDriverPromise;
   }
 
   async set(key: string | number, value: Value, options: SetOptions<Columns> = {}): Promise<void> {
     // KD-7: storing undefined is a deletion.
     if (value === undefined) {
       await this.delete(key);
-      return;
-    }
-    const schema = await this.schemaDriver();
-    if (schema) {
-      const rawKeys = (options.keys ?? options.columns) as Record<string, unknown> | undefined;
-      const columns = validateColumnValues(schema.schema, rawKeys);
-      await schema.setRecord(key, serialize(value as JsonValue), columns, options.ttlMs);
       return;
     }
     const strKey = String(key);
@@ -106,10 +115,21 @@ export class Table<Value = JsonValue, Columns extends Record<string, unknown> = 
       value: value as JsonValue,
       ttlMs: options.ttlMs,
     });
+
+    const schema = await this.schemaDriver();
+    const cKey = this.cacheKey(strKey, Boolean(schema));
+    if (schema) {
+      const rawKeys = (options.keys ?? options.columns) as Record<string, unknown> | undefined;
+      const columns = validateColumnValues(schema.schema, rawKeys);
+      await schema.setRecord(key, serialize(before.value), columns, before.ttlMs);
+      if (this.deps.cache) await this.deps.cache.set(cKey, before.value, before.ttlMs);
+      await this.deps.hooks.run("afterWrite", before);
+      return;
+    }
+
     const driver = await this.deps.getDriver();
-    const physicalKey = toPhysicalKey(this.deps.scope, before.key);
-    await driver.set(physicalKey, serialize(before.value), before.ttlMs);
-    if (this.deps.cache) await this.deps.cache.set(physicalKey, before.value, before.ttlMs);
+    await driver.set(cKey, serialize(before.value), before.ttlMs);
+    if (this.deps.cache) await this.deps.cache.set(cKey, before.value, before.ttlMs);
     await this.deps.hooks.run("afterWrite", before);
   }
 
@@ -133,13 +153,53 @@ export class Table<Value = JsonValue, Columns extends Record<string, unknown> = 
    * `beforeWrite` — use {@link set} when a plugin must rewrite the value.
    */
   async update(
-    key: string,
+    key: string | number,
     patch: UpdatePatch<Value>,
     options: SetOptions = {},
   ): Promise<Value> {
-    const driver = await this.deps.getDriver();
-    const physicalKey = toPhysicalKey(this.deps.scope, key);
+    const strKey = String(key);
+    const schema = await this.schemaDriver();
+    const cKey = this.cacheKey(strKey, Boolean(schema));
+    if (schema) {
+      let written!: Value;
+      let writtenTtl: number | undefined;
 
+      if (schema.updateRecord) {
+        await schema.updateRecord(key, (current) => {
+          if (current === undefined) {
+            throw new KvdbError(
+              "QUERY",
+              `Cannot update key "${key}" in namespace "${this.deps.schemaName ?? this.namespace}": it does not exist`,
+            );
+          }
+          written = applyPatch(deserialize<Value>(current.value), patch);
+          writtenTtl = options.ttlMs ?? ttlFromExpiry(current.expiresAt);
+          return { value: serialize(written as JsonValue), ttlMs: writtenTtl };
+        });
+      } else {
+        const record = await schema.getRecord(key);
+        if (record === undefined) {
+          throw new KvdbError(
+            "QUERY",
+            `Cannot update key "${key}" in namespace "${this.deps.schemaName ?? this.namespace}": it does not exist`,
+          );
+        }
+        written = applyPatch(deserialize<Value>(record.value), patch);
+        writtenTtl = options.ttlMs ?? ttlFromExpiry(record.expiresAt);
+        await schema.setRecord(key, serialize(written as JsonValue), record.columns, writtenTtl);
+      }
+
+      if (this.deps.cache) await this.deps.cache.set(cKey, written, writtenTtl);
+      await this.deps.hooks.run("afterWrite", {
+        namespace: this.namespace,
+        key: strKey,
+        value: written as JsonValue,
+        ttlMs: writtenTtl,
+      });
+      return written;
+    }
+
+    const driver = await this.deps.getDriver();
     let written!: Value;
     let writtenTtl: number | undefined;
     // Pure read→merge→serialize, run by the driver under the row lock.
@@ -147,7 +207,7 @@ export class Table<Value = JsonValue, Columns extends Record<string, unknown> = 
       if (current === undefined) {
         throw new KvdbError(
           "QUERY",
-          `Cannot update key "${key}" in namespace "${this.namespace}": it does not exist`,
+          `Cannot update key "${strKey}" in namespace "${this.namespace}": it does not exist`,
         );
       }
       written = applyPatch(deserialize<Value>(current.value), patch);
@@ -156,17 +216,17 @@ export class Table<Value = JsonValue, Columns extends Record<string, unknown> = 
     };
 
     if (driver.update) {
-      await driver.update(physicalKey, mutate);
+      await driver.update(cKey, mutate);
     } else {
       // Non-atomic fallback for custom drivers without a native atomic update.
-      const result = mutate(await driver.get(physicalKey));
-      await driver.set(physicalKey, result.value, result.ttlMs);
+      const result = mutate(await driver.get(cKey));
+      await driver.set(cKey, result.value, result.ttlMs);
     }
 
-    if (this.deps.cache) await this.deps.cache.set(physicalKey, written, writtenTtl);
+    if (this.deps.cache) await this.deps.cache.set(cKey, written, writtenTtl);
     await this.deps.hooks.run("afterWrite", {
       namespace: this.namespace,
-      key,
+      key: strKey,
       value: written as JsonValue,
       ttlMs: writtenTtl,
     });
@@ -174,25 +234,27 @@ export class Table<Value = JsonValue, Columns extends Record<string, unknown> = 
   }
 
   async get(key: string | number): Promise<Value | undefined> {
-    const schema = await this.schemaDriver();
-    if (schema) {
-      const record = await schema.getRecord(key);
-      return record ? deserialize<Value>(record.value) : undefined;
-    }
     const strKey = String(key);
-    const physicalKey = toPhysicalKey(this.deps.scope, strKey);
     await this.deps.hooks.run("beforeRead", { namespace: this.namespace, key: strKey, value: undefined });
 
+    const schema = await this.schemaDriver();
+    const cKey = this.cacheKey(strKey, Boolean(schema));
     let value: Value | undefined;
-    const cached = this.deps.cache ? await this.deps.cache.get<Value>(physicalKey) : undefined;
+    const cached = this.deps.cache ? await this.deps.cache.get<Value>(cKey) : undefined;
     if (cached !== undefined) {
       value = cached;
+    } else if (schema) {
+      const record = await schema.getRecord(key);
+      if (record !== undefined) {
+        value = deserialize<Value>(record.value);
+        if (this.deps.cache) await this.deps.cache.set(cKey, value);
+      }
     } else {
       const driver = await this.deps.getDriver();
-      const entry = await driver.get(physicalKey);
+      const entry = await driver.get(cKey);
       if (entry !== undefined) {
         value = deserialize<Value>(entry.value);
-        if (this.deps.cache) await this.deps.cache.set(physicalKey, value);
+        if (this.deps.cache) await this.deps.cache.set(cKey, value);
       }
     }
 
@@ -205,14 +267,15 @@ export class Table<Value = JsonValue, Columns extends Record<string, unknown> = 
   }
 
   async delete(key: string | number): Promise<boolean> {
-    const schema = await this.schemaDriver();
-    if (schema) return schema.delete(key);
-    const driver = await this.deps.getDriver();
     const strKey = String(key);
-    const physicalKey = toPhysicalKey(this.deps.scope, strKey);
-    const deleted = await driver.delete(physicalKey);
-    if (this.deps.cache) await this.deps.cache.delete(physicalKey);
-    return deleted;
+    const schema = await this.schemaDriver();
+    const cKey = this.cacheKey(strKey, Boolean(schema));
+    if (this.deps.cache) await this.deps.cache.delete(cKey);
+    if (schema) {
+      return schema.delete(key);
+    }
+    const driver = await this.deps.getDriver();
+    return driver.delete(cKey);
   }
 
   async exists(key: string | number): Promise<boolean> {
@@ -225,16 +288,22 @@ export class Table<Value = JsonValue, Columns extends Record<string, unknown> = 
   /** Clear this namespace only (not the whole backend). */
   async clear(): Promise<void> {
     const schema = await this.schemaDriver();
-    if (schema) { await schema.clear(); return; }
+    if (schema) {
+      await schema.clear();
+      return;
+    }
     const driver = await this.deps.getDriver();
     await driver.deleteByPrefix(namespacePrefix(this.deps.scope));
-    // The shared cache may hold other namespaces; clear by prefix is not
-    // available on Cache, so callers relying on cache should scope per table.
   }
 
-  async getMany(keys: string[]): Promise<(Value | undefined)[]> {
+  async getMany(keys: (string | number)[]): Promise<(Value | undefined)[]> {
+    const schema = await this.schemaDriver();
+    if (schema) {
+      return Promise.all(keys.map((k) => this.get(k)));
+    }
     const driver = await this.deps.getDriver();
-    const physicalKeys = keys.map((key) => toPhysicalKey(this.deps.scope, key));
+    const strKeys = keys.map(String);
+    const physicalKeys = strKeys.map((key) => toPhysicalKey(this.deps.scope, key));
     const entries = driver.getMany
       ? await driver.getMany(physicalKeys)
       : await Promise.all(physicalKeys.map((key) => driver.get(key)));
@@ -243,10 +312,29 @@ export class Table<Value = JsonValue, Columns extends Record<string, unknown> = 
     );
   }
 
-  async setMany(items: { key: string; value: Value; ttlMs?: number }[]): Promise<void> {
+  async setMany(
+    items: {
+      key: string | number;
+      value: Value;
+      ttlMs?: number;
+      keys?: Record<string, unknown>;
+      columns?: Record<string, unknown>;
+    }[],
+  ): Promise<void> {
+    const schema = await this.schemaDriver();
+    if (schema) {
+      for (const item of items) {
+        await this.set(item.key, item.value, {
+          ttlMs: item.ttlMs,
+          keys: (item.keys ?? item.columns) as any,
+          columns: item.columns as any,
+        });
+      }
+      return;
+    }
     const driver = await this.deps.getDriver();
     const entries = items.map((item) => ({
-      key: toPhysicalKey(this.deps.scope, item.key),
+      key: toPhysicalKey(this.deps.scope, String(item.key)),
       value: serialize(item.value),
       ttlMs: item.ttlMs,
     }));
@@ -256,15 +344,30 @@ export class Table<Value = JsonValue, Columns extends Record<string, unknown> = 
       for (const entry of entries) await driver.set(entry.key, entry.value, entry.ttlMs);
     }
     if (this.deps.cache) {
-      await Promise.all(items.map((item) =>
-        this.deps.cache!.set(toPhysicalKey(this.deps.scope, item.key), item.value, item.ttlMs),
-      ));
+      await Promise.all(
+        items.map((item) =>
+          this.deps.cache!.set(
+            toPhysicalKey(this.deps.scope, String(item.key)),
+            item.value,
+            item.ttlMs,
+          ),
+        ),
+      );
     }
   }
 
-  async deleteMany(keys: string[]): Promise<number> {
+  async deleteMany(keys: (string | number)[]): Promise<number> {
+    const schema = await this.schemaDriver();
+    if (schema) {
+      let count = 0;
+      for (const key of keys) {
+        if (await this.delete(key)) count++;
+      }
+      return count;
+    }
     const driver = await this.deps.getDriver();
-    const physicalKeys = keys.map((key) => toPhysicalKey(this.deps.scope, key));
+    const strKeys = keys.map(String);
+    const physicalKeys = strKeys.map((key) => toPhysicalKey(this.deps.scope, key));
     const count = driver.deleteMany
       ? await driver.deleteMany(physicalKeys)
       : await physicalKeys.reduce(
@@ -278,6 +381,13 @@ export class Table<Value = JsonValue, Columns extends Record<string, unknown> = 
   }
 
   async getByPrefix(prefix: string): Promise<{ key: string; value: Value }[]> {
+    const schema = await this.schemaDriver();
+    if (schema) {
+      throw new KvdbError(
+        "UNSUPPORTED",
+        "Prefix scan operations (getByPrefix) are not supported on physical schema tables; use find() instead.",
+      );
+    }
     const driver = await this.deps.getDriver();
     const physicalPrefix = toPhysicalPrefix(this.deps.scope, prefix);
     const entries = await driver.getByPrefix(physicalPrefix);
@@ -288,6 +398,13 @@ export class Table<Value = JsonValue, Columns extends Record<string, unknown> = 
   }
 
   async deleteByPrefix(prefix: string): Promise<number> {
+    const schema = await this.schemaDriver();
+    if (schema) {
+      throw new KvdbError(
+        "UNSUPPORTED",
+        "Prefix scan operations (deleteByPrefix) are not supported on physical schema tables; use find() instead.",
+      );
+    }
     const driver = await this.deps.getDriver();
     return driver.deleteByPrefix(toPhysicalPrefix(this.deps.scope, prefix));
   }

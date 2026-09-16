@@ -15,6 +15,7 @@ import type {
   DriverCapabilities,
   ProviderName,
   UpdateMutator,
+  UpdateResult,
   SchemaTableDriver,
 } from "../types.js";
 import type { KVEntry, RawEntry } from "../../cache/types.js";
@@ -90,18 +91,18 @@ export class PostgresDriverFactory implements DriverFactory {
     const pool = new PoolCtor({ connectionString: this.options.url });
     const table = this.options.table ?? "kvdb_kv";
     await pool.query(`
-      CREATE TABLE IF NOT EXISTS ${table} (
-        key        text PRIMARY KEY,
-        value      text NOT NULL,
-        expires_at bigint,
-        created_at bigint NOT NULL,
-        updated_at bigint NOT NULL
+      CREATE TABLE IF NOT EXISTS "${table}" (
+        "key"        text PRIMARY KEY,
+        "value"      text NOT NULL,
+        "expires_at" bigint,
+        "created_at" bigint NOT NULL,
+        "updated_at" bigint NOT NULL
       );
-      CREATE INDEX IF NOT EXISTS ${table}_expires_at ON ${table} (expires_at);
+      CREATE INDEX IF NOT EXISTS "${table}_expires_at" ON "${table}" ("expires_at");
       -- text_pattern_ops so prefix/namespace scans (key LIKE 'ns:%') use an
       -- index: the default PK btree is unusable for LIKE under non-C collations
       -- (e.g. en_US.UTF-8). See docs — verified via EXPLAIN against real PG.
-      CREATE INDEX IF NOT EXISTS ${table}_key_prefix ON ${table} (key text_pattern_ops);
+      CREATE INDEX IF NOT EXISTS "${table}_key_prefix" ON "${table}" ("key" text_pattern_ops);
     `);
     const driver = new PostgresDriver(pool, table);
     for (const path of this.options.indexes ?? []) await driver.ensureIndex(path);
@@ -122,7 +123,7 @@ export class PostgresDriver implements Driver {
 
   async get(key: string): Promise<RawEntry | undefined> {
     const result = await this.pool.query<{ value: string; expires_at: string | null }>(
-      `SELECT value, expires_at FROM ${this.table} WHERE key = $1`,
+      `SELECT "value", "expires_at" FROM ${this.table} WHERE "key" = $1`,
       [key],
     );
     const row = result.rows[0];
@@ -138,16 +139,16 @@ export class PostgresDriver implements Driver {
   async set(key: string, value: string, ttlMs?: number): Promise<void> {
     const now = Date.now();
     await this.pool.query(
-      `INSERT INTO ${this.table} (key, value, expires_at, created_at, updated_at)
+      `INSERT INTO ${this.table} ("key", "value", "expires_at", "created_at", "updated_at")
        VALUES ($1, $2, $3, $4, $4)
-       ON CONFLICT (key) DO UPDATE SET
-         value = excluded.value, expires_at = excluded.expires_at, updated_at = excluded.updated_at`,
+       ON CONFLICT ("key") DO UPDATE SET
+         "value" = excluded."value", "expires_at" = excluded."expires_at", "updated_at" = excluded."updated_at"`,
       [key, value, expiresAtFromTtl(ttlMs, now) ?? null, now],
     );
   }
 
   async delete(key: string): Promise<boolean> {
-    const result = await this.pool.query(`DELETE FROM ${this.table} WHERE key = $1`, [key]);
+    const result = await this.pool.query(`DELETE FROM ${this.table} WHERE "key" = $1`, [key]);
     return (result.rowCount ?? 0) > 0;
   }
 
@@ -158,7 +159,7 @@ export class PostgresDriver implements Driver {
       // FOR UPDATE locks the row for the txn, so a concurrent updater blocks here
       // until we COMMIT — they then read our write instead of clobbering it.
       const result = await client.query<{ value: string; expires_at: string | null }>(
-        `SELECT value, expires_at FROM ${this.table} WHERE key = $1 FOR UPDATE`,
+        `SELECT "value", "expires_at" FROM ${this.table} WHERE "key" = $1 FOR UPDATE`,
         [key],
       );
       const now = Date.now();
@@ -167,17 +168,17 @@ export class PostgresDriver implements Driver {
       if (row !== undefined) {
         const expiresAt = row.expires_at === null ? undefined : Number(row.expires_at);
         if (expiresAt !== undefined && expiresAt <= now) {
-          await client.query(`DELETE FROM ${this.table} WHERE key = $1`, [key]);
+          await client.query(`DELETE FROM ${this.table} WHERE "key" = $1`, [key]);
         } else {
           current = { value: row.value, expiresAt };
         }
       }
       const next = mutate(current);
       await client.query(
-        `INSERT INTO ${this.table} (key, value, expires_at, created_at, updated_at)
+        `INSERT INTO ${this.table} ("key", "value", "expires_at", "created_at", "updated_at")
          VALUES ($1, $2, $3, $4, $4)
-         ON CONFLICT (key) DO UPDATE SET
-           value = excluded.value, expires_at = excluded.expires_at, updated_at = excluded.updated_at`,
+         ON CONFLICT ("key") DO UPDATE SET
+           "value" = excluded."value", "expires_at" = excluded."expires_at", "updated_at" = excluded."updated_at"`,
         [key, next.value, expiresAtFromTtl(next.ttlMs, now) ?? null, now],
       );
       await client.query("COMMIT");
@@ -200,7 +201,7 @@ export class PostgresDriver implements Driver {
   async getMany(keys: string[]): Promise<(RawEntry | undefined)[]> {
     if (keys.length === 0) return [];
     const result = await this.pool.query<{ key: string; value: string; expires_at: string | null }>(
-      `SELECT key, value, expires_at FROM ${this.table} WHERE key = ANY($1)`,
+      `SELECT "key", "value", "expires_at" FROM ${this.table} WHERE "key" = ANY($1)`,
       [keys],
     );
     const now = Date.now();
@@ -220,10 +221,10 @@ export class PostgresDriver implements Driver {
       const now = Date.now();
       for (const entry of entries) {
         await client.query(
-          `INSERT INTO ${this.table} (key, value, expires_at, created_at, updated_at)
+          `INSERT INTO ${this.table} ("key", "value", "expires_at", "created_at", "updated_at")
            VALUES ($1, $2, $3, $4, $4)
-           ON CONFLICT (key) DO UPDATE SET
-             value = excluded.value, expires_at = excluded.expires_at, updated_at = excluded.updated_at`,
+           ON CONFLICT ("key") DO UPDATE SET
+             "value" = excluded."value", "expires_at" = excluded."expires_at", "updated_at" = excluded."updated_at"`,
           [entry.key, entry.value, expiresAtFromTtl(entry.ttlMs, now) ?? null, now],
         );
       }
@@ -238,7 +239,7 @@ export class PostgresDriver implements Driver {
 
   async deleteMany(keys: string[]): Promise<number> {
     if (keys.length === 0) return 0;
-    const result = await this.pool.query(`DELETE FROM ${this.table} WHERE key = ANY($1)`, [keys]);
+    const result = await this.pool.query(`DELETE FROM ${this.table} WHERE "key" = ANY($1)`, [keys]);
     return result.rowCount ?? 0;
   }
 
@@ -246,11 +247,11 @@ export class PostgresDriver implements Driver {
     const now = Date.now();
     const where =
       prefix === undefined
-        ? `expires_at IS NULL OR expires_at > $1`
-        : `key LIKE $1 AND (expires_at IS NULL OR expires_at > $2)`;
+        ? `"expires_at" IS NULL OR "expires_at" > $1`
+        : `"key" LIKE $1 AND ("expires_at" IS NULL OR "expires_at" > $2)`;
     const params = prefix === undefined ? [now] : [`${escapeLike(prefix)}%`, now];
     const result = await this.pool.query<{ key: string; value: string; expires_at: string | null }>(
-      `SELECT key, value, expires_at FROM ${this.table} WHERE ${where}`,
+      `SELECT "key", "value", "expires_at" FROM ${this.table} WHERE ${where}`,
       params,
     );
     for (const row of result.rows) {
@@ -263,15 +264,15 @@ export class PostgresDriver implements Driver {
 
   async getByPrefix(prefix: string): Promise<KVEntry[]> {
     const result = await this.pool.query<{ key: string; value: string }>(
-      `SELECT key, value FROM ${this.table}
-       WHERE key LIKE $1 AND (expires_at IS NULL OR expires_at > $2)`,
+      `SELECT "key", "value" FROM ${this.table}
+       WHERE "key" LIKE $1 AND ("expires_at" IS NULL OR "expires_at" > $2)`,
       [`${escapeLike(prefix)}%`, Date.now()],
     );
     return result.rows.map((row) => ({ key: row.key, value: row.value }));
   }
 
   async deleteByPrefix(prefix: string): Promise<number> {
-    const result = await this.pool.query(`DELETE FROM ${this.table} WHERE key LIKE $1`, [
+    const result = await this.pool.query(`DELETE FROM ${this.table} WHERE "key" LIKE $1`, [
       `${escapeLike(prefix)}%`,
     ]);
     return result.rowCount ?? 0;
@@ -282,10 +283,10 @@ export class PostgresDriver implements Driver {
     const params: unknown[] = [...compiled.params];
     const nowIndex = params.push(Date.now());
 
-    let sql = `SELECT key, value FROM ${this.table}
-       WHERE (expires_at IS NULL OR expires_at > $${nowIndex}) AND (${compiled.sql})`;
+    let sql = `SELECT "key", "value" FROM ${this.table}
+       WHERE ("expires_at" IS NULL OR "expires_at" > $${nowIndex}) AND (${compiled.sql})`;
     if (keyPrefix) {
-      sql += ` AND key LIKE $${params.push(`${escapeLike(keyPrefix)}%`)}`;
+      sql += ` AND "key" LIKE $${params.push(`${escapeLike(keyPrefix)}%`)}`;
     }
     if (options.sort && options.sort.length > 0) {
       sql += ` ORDER BY ${compileOrderBy(options.sort, this.dialect)}`;
@@ -300,26 +301,52 @@ export class PostgresDriver implements Driver {
   async ensureIndex(jsonPath: string): Promise<void> {
     const path = parsePath(jsonPath);
     const safe = jsonPath.replace(/[^A-Za-z0-9]/g, "_");
-    // Two expression indexes: a TEXT one for string equality / $in / sort, and a
-    // NULL-safe NUMERIC one (CASE jsonb_typeof) for numeric range/eq. Queries
-    // pick the cast that matches the comparison value, so both shapes stay
-    // index-backed; the numeric index never fails to build on mixed-type rows.
     const textExpr = this.dialect.scalarAt(path);
     const numericExpr = this.dialect.scalarAt(path, 0);
     await this.pool.query(
-      `CREATE INDEX IF NOT EXISTS ${this.table}_json_${safe} ON ${this.table} ((${textExpr}))`,
+      `CREATE INDEX IF NOT EXISTS "${this.table}_json_${safe}" ON ${this.table} ((${textExpr}))`,
     );
     await this.pool.query(
-      `CREATE INDEX IF NOT EXISTS ${this.table}_json_${safe}_num ON ${this.table} ((${numericExpr}))`,
+      `CREATE INDEX IF NOT EXISTS "${this.table}_json_${safe}_num" ON ${this.table} ((${numericExpr}))`,
     );
   }
 
   async purgeExpired(): Promise<number> {
     const result = await this.pool.query(
-      `DELETE FROM ${this.table} WHERE expires_at IS NOT NULL AND expires_at <= $1`,
+      `DELETE FROM ${this.table} WHERE "expires_at" IS NOT NULL AND "expires_at" <= $1`,
       [Date.now()],
     );
-    return result.rowCount ?? 0;
+    let total = result.rowCount ?? 0;
+
+    try {
+      const regCheck = await this.pool.query(
+        "SELECT to_regclass('kvdb_schema_registry') AS exists",
+      );
+      if (regCheck.rows[0]?.exists) {
+        const regRows = await this.pool.query<{ logical_name: string }>(
+          "SELECT logical_name FROM kvdb_schema_registry",
+        );
+        const now = Date.now();
+        for (const r of regRows.rows) {
+          if (r.logical_name) {
+            const phys = schemaTableName(r.logical_name);
+            try {
+              const res = await this.pool.query(
+                `DELETE FROM ${phys} WHERE "expires_at" IS NOT NULL AND "expires_at" <= $1`,
+                [now],
+              );
+              total += res.rowCount ?? 0;
+            } catch {
+              // Ignore if dropped
+            }
+          }
+        }
+      }
+    } catch {
+      // Ignore registry error
+    }
+
+    return total;
   }
 
   async openSchemaTable<Columns extends Record<string, unknown>>(
@@ -352,13 +379,13 @@ export class PostgresDriver implements Driver {
         CREATE TABLE IF NOT EXISTS ${physical} (
           ${pkSql},
           ${definitions}${definitions ? "," : ""}
-          value TEXT NOT NULL,
-          expires_at BIGINT,
-          created_at BIGINT NOT NULL,
-          updated_at BIGINT NOT NULL
+          "value" TEXT NOT NULL,
+          "expires_at" BIGINT,
+          "created_at" BIGINT NOT NULL,
+          "updated_at" BIGINT NOT NULL
         )
       `);
-      await this.pool.query(`CREATE INDEX IF NOT EXISTS ${physical}_expires_at ON ${physical} (expires_at)`);
+      await this.pool.query(`CREATE INDEX IF NOT EXISTS "${physical}_expires_at" ON ${physical} ("expires_at")`);
       await this.pool.query(
         "INSERT INTO kvdb_schema_registry (logical_name, schema_json) VALUES ($1, $2) ON CONFLICT (logical_name) DO NOTHING",
         [name, JSON.stringify(resolved)],
@@ -503,6 +530,75 @@ class PostgresSchemaTable<Columns extends Record<string, unknown>> implements Sc
     };
   }
 
+  async updateRecord(
+    key: string | number,
+    mutate: (current: { key: string | number; value: string; columns: Record<string, unknown>; expiresAt?: number } | undefined) => UpdateResult,
+  ): Promise<void> {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const pk = this.pkName;
+      const result = await client.query<Record<string, unknown>>(
+        `SELECT * FROM ${this.table} WHERE "${pk}" = $1 FOR UPDATE`,
+        [key],
+      );
+      const row = result.rows[0];
+      const now = Date.now();
+      let current: { key: string | number; value: string; columns: Record<string, unknown>; expiresAt?: number } | undefined;
+      if (row) {
+        const expiry = row.expires_at === null ? null : Number(row.expires_at);
+        if (expiry !== null && expiry <= now) {
+          await client.query(`DELETE FROM ${this.table} WHERE "${pk}" = $1`, [key]);
+        } else {
+          current = {
+            key: this.parsePk(row[pk]),
+            value: row.value as string,
+            columns: this.parseColumns(row),
+            expiresAt: expiry ?? undefined,
+          };
+        }
+      }
+      const next = mutate(current);
+      const names = Object.keys(this.secondaryKeys);
+      const fields = [pk, ...names, "value", "expires_at", "created_at", "updated_at"];
+      const params: unknown[] = [key];
+      const cols = current ? current.columns : {};
+      for (const name of names) {
+        const val = cols[name];
+        const def = this.secondaryKeys[name]!;
+        if (val === undefined) {
+          params.push(def.default !== undefined ? def.default : null);
+        } else if (def.type === "json") {
+          params.push(JSON.stringify(val));
+        } else {
+          params.push(val);
+        }
+      }
+      params.push(next.value);
+      params.push(expiresAtFromTtl(next.ttlMs, now) ?? null);
+      params.push(now);
+      params.push(now);
+
+      const placeholders = fields.map((_, i) => `$${i + 1}`).join(", ");
+      const updateClauses = [...names, "value", "expires_at", "updated_at"]
+        .map((field) => `"${field}" = EXCLUDED."${field}"`)
+        .join(", ");
+
+      await client.query(
+        `INSERT INTO ${this.table} (${fields.map((f) => `"${f}"`).join(", ")})
+         VALUES (${placeholders})
+         ON CONFLICT ("${pk}") DO UPDATE SET ${updateClauses}`,
+        params,
+      );
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
   async delete(key: string | number): Promise<boolean> {
     const pk = this.pkName;
     const result = await this.pool.query(
@@ -523,7 +619,7 @@ class PostgresSchemaTable<Columns extends Record<string, unknown>> implements Sc
     const params: unknown[] = [...compiled.params];
     const nowIdx = params.push(Date.now());
 
-    let sql = `SELECT * FROM ${this.table} WHERE (expires_at IS NULL OR expires_at > $${nowIdx}) AND (${compiled.sql})`;
+    let sql = `SELECT * FROM ${this.table} WHERE ("expires_at" IS NULL OR "expires_at" > $${nowIdx}) AND (${compiled.sql})`;
     if (options.sort && options.sort.length > 0) {
       sql += ` ORDER BY ${compileOrderBy(options.sort, dialect)}`;
     }

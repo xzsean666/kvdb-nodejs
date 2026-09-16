@@ -24,6 +24,10 @@ export interface SchemaTableDriver<Value = JsonValue, Columns extends Record<str
   setRecord(key: string | number, value: string, columns: Record<string, unknown>, ttlMs?: number): MaybePromise<void>;
   getRecord(key: string | number): MaybePromise<{ key: string | number; value: string; columns: Record<string, unknown>; expiresAt?: number } | undefined>;
   getRecordByKey?(keyName: string, keyValue: unknown): MaybePromise<{ key: string | number; value: string; columns: Record<string, unknown>; expiresAt?: number } | undefined>;
+  updateRecord?(
+    key: string | number,
+    mutate: (current: { key: string | number; value: string; columns: Record<string, unknown>; expiresAt?: number } | undefined) => UpdateResult,
+  ): MaybePromise<void>;
   delete(key: string | number): MaybePromise<boolean>;
   clear(): MaybePromise<void>;
   find(where: QueryNode, options?: FindOptions): MaybePromise<Array<{ key: string | number; value: string; columns: Record<string, unknown> }>>;

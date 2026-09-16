@@ -35,6 +35,8 @@ const COMPARE_OPS: ReadonlySet<string> = new Set([
   "$nin",
 ]);
 
+const VALID_PATH_SEGMENT = /^[A-Za-z0-9_$-]+$/;
+
 /** Parse a dotted path string into a FieldPath. */
 export function parsePath(source: string): FieldPath {
   if (source.length === 0) {
@@ -44,7 +46,13 @@ export function parsePath(source: string): FieldPath {
     if (part.length === 0) {
       throw new KvdbQueryError(`Empty segment in path "${source}"`);
     }
-    return /^\d+$/.test(part) ? { index: Number(part) } : { key: part };
+    if (/^\d+$/.test(part)) {
+      return { index: Number(part) };
+    }
+    if (!VALID_PATH_SEGMENT.test(part)) {
+      throw new KvdbQueryError(`Invalid characters in field path segment "${part}"`);
+    }
+    return { key: part };
   });
   return { segments, source };
 }
@@ -139,12 +147,21 @@ function parseSchemaBranchList(op: string, value: unknown, knownCols: Set<string
   return value.map((branch) => parseSchemaWhereNode(asObject(op, branch), knownCols));
 }
 
-function parseColumnField(key: string, value: unknown): QueryNode {
+export function parseColumnField(key: string, value: unknown): QueryNode {
   const parts = key.split(".");
   const colName = parts[0]!;
-  const subSegments: PathSegment[] = parts.slice(1).map((part) =>
-    /^\d+$/.test(part) ? { index: Number(part) } : { key: part }
-  );
+  if (!VALID_PATH_SEGMENT.test(colName)) {
+    throw new KvdbQueryError(`Invalid column name in field path "${key}"`);
+  }
+  const subSegments: PathSegment[] = parts.slice(1).map((part) => {
+    if (/^\d+$/.test(part)) {
+      return { index: Number(part) };
+    }
+    if (!VALID_PATH_SEGMENT.test(part)) {
+      throw new KvdbQueryError(`Invalid characters in field path segment "${part}"`);
+    }
+    return { key: part };
+  });
   const path: FieldPath = {
     source: colName,
     sourceKind: "column",
@@ -233,12 +250,21 @@ export function parseSort(
     let path: FieldPath;
     if (knownCols.has(root)) {
       const parts = spec.path.split(".");
+      if (!VALID_PATH_SEGMENT.test(root)) {
+        throw new KvdbQueryError(`Invalid column name in sort path "${spec.path}"`);
+      }
       path = {
         source: parts[0]!,
         sourceKind: "column",
-        segments: parts.slice(1).map((part) =>
-          /^\d+$/.test(part) ? { index: Number(part) } : { key: part },
-        ),
+        segments: parts.slice(1).map((part) => {
+          if (/^\d+$/.test(part)) {
+            return { index: Number(part) };
+          }
+          if (!VALID_PATH_SEGMENT.test(part)) {
+            throw new KvdbQueryError(`Invalid characters in sort path segment "${part}"`);
+          }
+          return { key: part };
+        }),
       };
     } else {
       path = parsePath(spec.path);

@@ -32,18 +32,19 @@
 | **TASK-020** | Table API 多键统一点查与索引直连查询 | M2 | **DONE** | TASK-015..017 | `src/core/table.ts`, `src/query/*` |
 | **TASK-021** | 跨后端动态多键与索引合规测试套件 | M2 | **DONE** | TASK-017..020 | `test/compliance/multikey-compliance.ts` |
 | **TASK-022** | 动态多键使用规范、示例与文档发布 | M2 | **DONE** | TASK-021 | `docs/SPEC.md`, `examples/*` |
-| **TASK-023** | 查询结果缓存 (Query Cache + Write Invalidation) | M3 | **TODO** | TASK-020 | `src/core/table.ts`, `src/cache/*` |
-| **TASK-024** | Cache 前缀清理能力 (deleteByPrefix) | M3 | **TODO** | TASK-004 | `src/cache/*` |
-| **TASK-025** | PostgreSQL 与 MongoDB 真实 Docker 环境合规验证 | M3 | **TODO** | TASK-008, 021 | `test/compliance/*` |
-| **TASK-026** | Redis 与 MySQL 驱动扩展 | M3 | **TODO** | TASK-007 | `src/drivers/*` |
+| **TASK-023-AUDIT** | 全面安全/性能/逻辑审计与生产级修复及文档升级 | M2+ | **DONE** | TASK-022 | `src/*`, `test/unit/audit-*`, `docs/*` |
+| **TASK-024** | 查询结果缓存 (Query Cache + Write Invalidation) | M3 | **TODO** | TASK-020 | `src/core/table.ts`, `src/cache/*` |
+| **TASK-025** | Cache 前缀清理能力 (deleteByPrefix) | M3 | **TODO** | TASK-004 | `src/cache/*` |
+| **TASK-026** | PostgreSQL 与 MongoDB 真实 Docker 环境合规验证 | M3 | **TODO** | TASK-008, 021 | `test/compliance/*` |
+| **TASK-027** | Redis 与 MySQL 驱动扩展 | M3 | **TODO** | TASK-007 | `src/drivers/*` |
 
 ---
 
 ## 2. 状态流转总览
 
-- **已完成 (DONE)**: TASK-001 ~ TASK-022 (22 项，Milestone 1 基础架构与 Milestone 2 动态多键原生索引全面完成)
-- **待开发 (TODO)**: 0 项 (Milestone 2 全部任务交付完毕)
-- **后续规划 (TODO)**: TASK-023 ~ TASK-026 (4 项，Milestone 3 生产级功能扩展与生态演进)
+- **已完成 (DONE)**: TASK-001 ~ TASK-022, TASK-023-AUDIT (23 项，包含系统深度审计与安全性能加固)
+- **待开发 (TODO)**: 0 项 (Milestone 2 及审计修复交付完毕)
+- **后续规划 (TODO)**: TASK-024 ~ TASK-027 (4 项，Milestone 3 生产级功能扩展与生态演进)
 
 - **待审查/验证中 (REVIEW)**: 0 项
 - **已阻塞 (BLOCKED)**: 0 项

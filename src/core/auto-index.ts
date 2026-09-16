@@ -9,7 +9,10 @@ export class AutoIndexManager {
   private readonly counts = new Map<string, number>();
   private readonly indexed = new Set<string>();
 
-  constructor(private readonly threshold: number) {}
+  constructor(
+    private readonly threshold: number,
+    private readonly maxTracked: number = 10_000,
+  ) {}
 
   /**
    * Record that `paths` were queried. Returns the subset that just reached the
@@ -27,6 +30,20 @@ export class AutoIndexManager {
         toIndex.push(path);
       }
     }
+
+    if (this.counts.size > this.maxTracked) {
+      const excess = this.counts.size - this.maxTracked;
+      const iterator = this.counts.keys();
+      for (let i = 0; i < excess; i++) {
+        const nextKey = iterator.next().value;
+        if (nextKey !== undefined) {
+          this.counts.delete(nextKey);
+        } else {
+          break;
+        }
+      }
+    }
+
     return toIndex;
   }
 }

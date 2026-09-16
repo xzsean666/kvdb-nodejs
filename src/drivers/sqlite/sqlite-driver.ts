@@ -15,6 +15,7 @@ import type {
   DriverCapabilities,
   ProviderName,
   UpdateMutator,
+  UpdateResult,
 } from "../types.js";
 import type { KVEntry, RawEntry } from "../../cache/types.js";
 import type { QueryNode, FindOptions } from "../../query/ast.js";
@@ -115,27 +116,27 @@ class SqliteDriver implements Driver {
     if (file !== ":memory:") this.database.pragma("journal_mode = WAL");
 
     this.database.exec(`
-      CREATE TABLE IF NOT EXISTS ${table} (
-        key        TEXT PRIMARY KEY,
-        value      TEXT NOT NULL,
-        expires_at INTEGER,
-        created_at INTEGER NOT NULL,
-        updated_at INTEGER NOT NULL
+      CREATE TABLE IF NOT EXISTS ${quoteIdent(table)} (
+        "key"        TEXT PRIMARY KEY,
+        "value"      TEXT NOT NULL,
+        "expires_at" INTEGER,
+        "created_at" INTEGER NOT NULL,
+        "updated_at" INTEGER NOT NULL
       );
-      CREATE INDEX IF NOT EXISTS ${table}_expires_at ON ${table} (expires_at);
+      CREATE INDEX IF NOT EXISTS ${quoteIdent(`${table}_expires_at`)} ON ${quoteIdent(table)} ("expires_at");
     `);
 
     this.statements = {
-      get: this.database.prepare(`SELECT value, expires_at FROM ${table} WHERE key = ?`),
+      get: this.database.prepare(`SELECT "value", "expires_at" FROM ${quoteIdent(table)} WHERE "key" = ?`),
       upsert: this.database.prepare(
-        `INSERT INTO ${table} (key, value, expires_at, created_at, updated_at)
+        `INSERT INTO ${quoteIdent(table)} ("key", "value", "expires_at", "created_at", "updated_at")
          VALUES (@key, @value, @expiresAt, @now, @now)
-         ON CONFLICT(key) DO UPDATE SET
-           value = excluded.value,
-           expires_at = excluded.expires_at,
-           updated_at = excluded.updated_at`,
+         ON CONFLICT("key") DO UPDATE SET
+           "value" = excluded."value",
+           "expires_at" = excluded."expires_at",
+           "updated_at" = excluded."updated_at"`,
       ),
-      delete: this.database.prepare(`DELETE FROM ${table} WHERE key = ?`),
+      delete: this.database.prepare(`DELETE FROM ${quoteIdent(table)} WHERE "key" = ?`),
     };
   }
 
@@ -187,7 +188,7 @@ class SqliteDriver implements Driver {
   }
 
   clear(): void {
-    this.database.exec(`DELETE FROM ${this.table}`);
+    this.database.exec(`DELETE FROM ${quoteIdent(this.table)}`);
   }
 
   getMany(keys: string[]): (RawEntry | undefined)[] {
@@ -214,11 +215,11 @@ class SqliteDriver implements Driver {
     const now = Date.now();
     const where =
       prefix === undefined
-        ? "expires_at IS NULL OR expires_at > ?"
-        : `key LIKE ? ESCAPE '\\' AND (expires_at IS NULL OR expires_at > ?)`;
+        ? '"expires_at" IS NULL OR "expires_at" > ?'
+        : `"key" LIKE ? ESCAPE '\\' AND ("expires_at" IS NULL OR "expires_at" > ?)`;
     const params = prefix === undefined ? [now] : [`${escapeLike(prefix)}%`, now];
     const statement = this.database.prepare(
-      `SELECT key, value, expires_at FROM ${this.table} WHERE ${where}`,
+      `SELECT "key", "value", "expires_at" FROM ${quoteIdent(this.table)} WHERE ${where}`,
     );
     for (const row of statement.iterate(...params) as Iterable<{
       key: string;
@@ -232,8 +233,8 @@ class SqliteDriver implements Driver {
   getByPrefix(prefix: string): KVEntry[] {
     const rows = this.database
       .prepare(
-        `SELECT key, value FROM ${this.table}
-         WHERE key LIKE ? ESCAPE '\\' AND (expires_at IS NULL OR expires_at > ?)`,
+        `SELECT "key", "value" FROM ${quoteIdent(this.table)}
+         WHERE "key" LIKE ? ESCAPE '\\' AND ("expires_at" IS NULL OR "expires_at" > ?)`,
       )
       .all(`${escapeLike(prefix)}%`, Date.now()) as { key: string; value: string }[];
     return rows.map((row) => ({ key: row.key, value: row.value }));
@@ -241,20 +242,20 @@ class SqliteDriver implements Driver {
 
   deleteByPrefix(prefix: string): number {
     return this.database
-      .prepare(`DELETE FROM ${this.table} WHERE key LIKE ? ESCAPE '\\'`)
+      .prepare(`DELETE FROM ${quoteIdent(this.table)} WHERE "key" LIKE ? ESCAPE '\\'`)
       .run(`${escapeLike(prefix)}%`).changes;
   }
 
   find(where: QueryNode, options: FindOptions = {}, keyPrefix?: string): KVEntry[] {
     const compiled = compileWhere(where, this.dialect);
-    const clauses = [`(expires_at IS NULL OR expires_at > ?)`, `(${compiled.sql})`];
+    const clauses = [`("expires_at" IS NULL OR "expires_at" > ?)`, `(${compiled.sql})`];
     const params: unknown[] = [Date.now(), ...compiled.params];
     if (keyPrefix) {
-      clauses.push(`key LIKE ? ESCAPE '\\'`);
+      clauses.push(`"key" LIKE ? ESCAPE '\\'`);
       params.push(`${escapeLike(keyPrefix)}%`);
     }
 
-    let sql = `SELECT key, value FROM ${this.table} WHERE ${clauses.join(" AND ")}`;
+    let sql = `SELECT "key", "value" FROM ${quoteIdent(this.table)} WHERE ${clauses.join(" AND ")}`;
     if (options.sort && options.sort.length > 0) {
       sql += ` ORDER BY ${compileOrderBy(options.sort, this.dialect)}`;
     }
@@ -274,9 +275,10 @@ class SqliteDriver implements Driver {
   ensureIndex(jsonPath: string): void {
     const path = parsePath(jsonPath);
     const expression = this.dialect.scalarAt(path);
-    const indexName = `${this.table}_json_${jsonPath.replace(/[^A-Za-z0-9]/g, "_")}`;
+    const safe = jsonPath.replace(/[^A-Za-z0-9]/g, "_");
+    const indexName = `${this.table}_json_${safe}`;
     this.database.exec(
-      `CREATE INDEX IF NOT EXISTS ${indexName} ON ${this.table} (${expression})`,
+      `CREATE INDEX IF NOT EXISTS ${quoteIdent(indexName)} ON ${quoteIdent(this.table)} (${expression})`,
     );
   }
 
@@ -284,42 +286,118 @@ class SqliteDriver implements Driver {
     name: string,
     schema?: TableSchema<Columns> | MultiKeySchema<Columns>,
   ): SchemaTableDriver<unknown, Columns> | undefined {
-
-    this.database.exec("CREATE TABLE IF NOT EXISTS kvdb_schema_registry (logical_name TEXT PRIMARY KEY, schema_json TEXT NOT NULL)");
-    const existing = this.database.prepare("SELECT schema_json FROM kvdb_schema_registry WHERE logical_name = ?").get(name) as { schema_json: string } | undefined;
+    this.database.exec(
+      "CREATE TABLE IF NOT EXISTS kvdb_schema_registry (logical_name TEXT PRIMARY KEY, schema_json TEXT NOT NULL)",
+    );
+    const existing = this.database
+      .prepare("SELECT schema_json FROM kvdb_schema_registry WHERE logical_name = ?")
+      .get(name) as { schema_json: string } | undefined;
     if (existing && schema && !schemasEqual(JSON.parse(existing.schema_json) as TableSchema, schema)) {
       throw new KvdbConfigError(`Schema conflict for table ${name}`);
     }
-    const resolved = (schema ?? (existing ? JSON.parse(existing.schema_json) : undefined)) as TableSchema<Columns> | undefined;
+    const resolved = (schema ?? (existing ? JSON.parse(existing.schema_json) : undefined)) as
+      | TableSchema<Columns>
+      | undefined;
     if (!resolved) return undefined;
     validateTableSchema(resolved);
     const norm = normalizeTableSchema(resolved);
     const physical = schemaTableName(name);
     if (!existing) {
-      const pkSql = `${norm.primaryKey.name} ${norm.primaryKey.type === "integer" ? "INTEGER PRIMARY KEY" : "TEXT PRIMARY KEY"}`;
-      const definitions = Object.entries(norm.keys).map(([column, definition]) => `${column} ${sqliteType(definition.type)}${definition.nullable === false ? " NOT NULL" : ""}${definition.default !== undefined ? ` DEFAULT ${sqlDefault(definition.default)}` : ""}`).join(",\n");
-      this.database.exec(`CREATE TABLE IF NOT EXISTS ${physical} (${pkSql}, ${definitions}${definitions ? "," : ""} value TEXT NOT NULL, expires_at INTEGER, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)`);
-      this.database.exec(`CREATE INDEX IF NOT EXISTS ${physical}_expires_at ON ${physical} (expires_at)`);
-      this.database.prepare("INSERT INTO kvdb_schema_registry (logical_name, schema_json) VALUES (?, ?)").run(name, JSON.stringify(resolved));
-      for (const [column, definition] of Object.entries(norm.keys)) if (definition.index) this.createColumnIndex(physical, column, typeof definition.index === "object" ? definition.index : {});
+      const pkSql = `${quoteIdent(norm.primaryKey.name)} ${
+        norm.primaryKey.type === "integer" ? "INTEGER PRIMARY KEY" : "TEXT PRIMARY KEY"
+      }`;
+      const definitions = Object.entries(norm.keys)
+        .map(
+          ([column, definition]) =>
+            `${quoteIdent(column)} ${sqliteType(definition.type)}${
+              definition.nullable === false ? " NOT NULL" : ""
+            }${definition.default !== undefined ? ` DEFAULT ${sqlDefault(definition.default)}` : ""}`,
+        )
+        .join(",\n");
+      this.database.exec(
+        `CREATE TABLE IF NOT EXISTS ${quoteIdent(physical)} (${pkSql}, ${definitions}${
+          definitions ? "," : ""
+        } "value" TEXT NOT NULL, "expires_at" INTEGER, "created_at" INTEGER NOT NULL, "updated_at" INTEGER NOT NULL)`,
+      );
+      this.database.exec(
+        `CREATE INDEX IF NOT EXISTS ${quoteIdent(`${physical}_expires_at`)} ON ${quoteIdent(
+          physical,
+        )} ("expires_at")`,
+      );
+      this.database
+        .prepare("INSERT INTO kvdb_schema_registry (logical_name, schema_json) VALUES (?, ?)")
+        .run(name, JSON.stringify(resolved));
+      for (const [column, definition] of Object.entries(norm.keys)) {
+        if (definition.index) {
+          this.createColumnIndex(
+            physical,
+            column,
+            typeof definition.index === "object" ? definition.index : {},
+          );
+        }
+      }
       for (const index of norm.indexes) this.createCompositeIndex(physical, index);
     }
     return new SqliteSchemaTable(this.database, physical, name, resolved);
   }
 
-  private createColumnIndex(table: string, column: string, options: { name?: string; unique?: boolean }): void {
+  private createColumnIndex(
+    table: string,
+    column: string,
+    options: { name?: string; unique?: boolean },
+  ): void {
     const index = options.name ?? `${table}_${column}_idx`;
-    this.database.exec(`CREATE ${options.unique ? "UNIQUE " : ""}INDEX IF NOT EXISTS ${index} ON ${table} (${column})`);
+    this.database.exec(
+      `CREATE ${options.unique ? "UNIQUE " : ""}INDEX IF NOT EXISTS ${quoteIdent(
+        index,
+      )} ON ${quoteIdent(table)} (${quoteIdent(column)})`,
+    );
   }
-  private createCompositeIndex(table: string, definition: { name?: string; columns: string[]; unique?: boolean }): void {
+
+  private createCompositeIndex(
+    table: string,
+    definition: { name?: string; columns: string[]; unique?: boolean },
+  ): void {
     const index = definition.name ?? `${table}_${definition.columns.join("_")}_idx`;
-    this.database.exec(`CREATE ${definition.unique ? "UNIQUE " : ""}INDEX IF NOT EXISTS ${index} ON ${table} (${definition.columns.join(",")})`);
+    this.database.exec(
+      `CREATE ${definition.unique ? "UNIQUE " : ""}INDEX IF NOT EXISTS ${quoteIdent(
+        index,
+      )} ON ${quoteIdent(table)} (${definition.columns.map(quoteIdent).join(",")})`,
+    );
   }
 
   purgeExpired(): number {
-    return this.database
-      .prepare(`DELETE FROM ${this.table} WHERE expires_at IS NOT NULL AND expires_at <= ?`)
+    let total = this.database
+      .prepare(`DELETE FROM ${quoteIdent(this.table)} WHERE "expires_at" IS NOT NULL AND "expires_at" <= ?`)
       .run(Date.now()).changes;
+
+    try {
+      const reg = this.database
+        .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='kvdb_schema_registry'")
+        .get();
+      if (reg) {
+        const rows = this.database.prepare("SELECT logical_name FROM kvdb_schema_registry").all() as {
+          logical_name: string;
+        }[];
+        const now = Date.now();
+        for (const r of rows) {
+          const phys = schemaTableName(r.logical_name);
+          try {
+            total += this.database
+              .prepare(
+                `DELETE FROM ${quoteIdent(phys)} WHERE "expires_at" IS NOT NULL AND "expires_at" <= ?`,
+              )
+              .run(now).changes;
+          } catch {
+            // Ignore dropped or missing schema table
+          }
+        }
+      }
+    } catch {
+      // Ignore registry error
+    }
+
+    return total;
   }
 
   raw(): BetterSqlite3.Database {
@@ -331,8 +409,16 @@ class SqliteDriver implements Driver {
   }
 }
 
-class SqliteSchemaTable<Columns extends Record<string, unknown>> implements SchemaTableDriver<unknown, Columns> {
+class SqliteSchemaTable<Columns extends Record<string, unknown>>
+  implements SchemaTableDriver<unknown, Columns>
+{
   schema: TableSchema<Columns>;
+  private statements!: {
+    get: BetterSqlite3.Statement;
+    delete: BetterSqlite3.Statement;
+    upsert: BetterSqlite3.Statement;
+    getBy: Map<string, BetterSqlite3.Statement>;
+  };
 
   constructor(
     private readonly database: BetterSqlite3.Database,
@@ -341,6 +427,7 @@ class SqliteSchemaTable<Columns extends Record<string, unknown>> implements Sche
     schema: TableSchema<Columns>,
   ) {
     this.schema = schema;
+    this.buildStatements();
   }
 
   private get pkName(): string {
@@ -351,12 +438,42 @@ class SqliteSchemaTable<Columns extends Record<string, unknown>> implements Sche
     return (this.schema.keys ?? this.schema.columns ?? {}) as Record<string, KeyDefinition>;
   }
 
-  setRecord(key: string | number, value: string, columns: Record<string, unknown>, ttlMs?: number): void {
+  private buildStatements(): void {
+    const pk = this.pkName;
+    const names = Object.keys(this.secondaryKeys);
+    const fields = [pk, ...names, "value", "expires_at", "created_at", "updated_at"];
+    const placeholders = fields.map((field) => `@${field}`).join(",");
+    const updateClauses = [...names, "value", "expires_at", "updated_at"]
+      .map((field) => `${quoteIdent(field)}=excluded.${quoteIdent(field)}`)
+      .join(",");
+
+    this.statements = {
+      get: this.database.prepare(
+        `SELECT * FROM ${quoteIdent(this.table)} WHERE ${quoteIdent(pk)} = ?`,
+      ),
+      delete: this.database.prepare(
+        `DELETE FROM ${quoteIdent(this.table)} WHERE ${quoteIdent(pk)} = ?`,
+      ),
+      upsert: this.database.prepare(
+        `INSERT INTO ${quoteIdent(this.table)} (${fields
+          .map(quoteIdent)
+          .join(",")}) VALUES (${placeholders}) ON CONFLICT(${quoteIdent(
+          pk,
+        )}) DO UPDATE SET ${updateClauses}`,
+      ),
+      getBy: new Map(),
+    };
+  }
+
+  setRecord(
+    key: string | number,
+    value: string,
+    columns: Record<string, unknown>,
+    ttlMs?: number,
+  ): void {
     const pk = this.pkName;
     const names = Object.keys(this.secondaryKeys);
     const now = Date.now();
-    const fields = [pk, ...names, "value", "expires_at", "created_at", "updated_at"];
-    const placeholders = fields.map((field) => `@${field}`).join(",");
     const params: Record<string, unknown> = {
       [pk]: key,
       value,
@@ -366,7 +483,12 @@ class SqliteSchemaTable<Columns extends Record<string, unknown>> implements Sche
     };
     for (const name of names) {
       const def = this.secondaryKeys[name]!;
-      const val = columns[name] !== undefined ? columns[name] : (def.default !== undefined ? def.default : null);
+      const val =
+        columns[name] !== undefined
+          ? columns[name]
+          : def.default !== undefined
+          ? def.default
+          : null;
       if (val === null || val === undefined) {
         params[name] = null;
       } else if (def.type === "boolean") {
@@ -377,15 +499,21 @@ class SqliteSchemaTable<Columns extends Record<string, unknown>> implements Sche
         params[name] = val;
       }
     }
-    const updateClauses = [...names, "value", "expires_at", "updated_at"].map((field) => `${field}=excluded.${field}`).join(",");
-    this.database.prepare(
-      `INSERT INTO ${this.table} (${fields.join(",")}) VALUES (${placeholders}) ON CONFLICT(${pk}) DO UPDATE SET ${updateClauses}`
-    ).run(params);
+    this.statements.upsert.run(params);
   }
 
-  getRecord(key: string | number): { key: string | number; value: string; columns: Record<string, unknown>; expiresAt?: number } | undefined {
+  getRecord(
+    key: string | number,
+  ):
+    | {
+        key: string | number;
+        value: string;
+        columns: Record<string, unknown>;
+        expiresAt?: number;
+      }
+    | undefined {
     const pk = this.pkName;
-    const row = this.database.prepare(`SELECT * FROM ${this.table} WHERE ${pk} = ?`).get(key) as Record<string, unknown> | undefined;
+    const row = this.statements.get.get(key) as Record<string, unknown> | undefined;
     if (!row) return undefined;
     const expiry = row.expires_at as number | null;
     if (expiry !== null && expiry <= Date.now()) {
@@ -395,10 +523,14 @@ class SqliteSchemaTable<Columns extends Record<string, unknown>> implements Sche
     const columns: Record<string, unknown> = {};
     for (const [name, definition] of Object.entries(this.secondaryKeys)) {
       const raw = row[name];
-      columns[name] = raw === null ? null
-        : definition.type === "json" && typeof raw === "string" ? JSON.parse(raw)
-        : definition.type === "boolean" ? Boolean(raw)
-        : raw;
+      columns[name] =
+        raw === null
+          ? null
+          : definition.type === "json" && typeof raw === "string"
+          ? JSON.parse(raw)
+          : definition.type === "boolean"
+          ? Boolean(raw)
+          : raw;
     }
     return {
       key: row[pk] as string | number,
@@ -408,7 +540,17 @@ class SqliteSchemaTable<Columns extends Record<string, unknown>> implements Sche
     };
   }
 
-  getRecordByKey(keyName: string, keyValue: unknown): { key: string | number; value: string; columns: Record<string, unknown>; expiresAt?: number } | undefined {
+  getRecordByKey(
+    keyName: string,
+    keyValue: unknown,
+  ):
+    | {
+        key: string | number;
+        value: string;
+        columns: Record<string, unknown>;
+        expiresAt?: number;
+      }
+    | undefined {
     const pk = this.pkName;
     if (keyName === pk) {
       return this.getRecord(keyValue as string | number);
@@ -417,12 +559,26 @@ class SqliteSchemaTable<Columns extends Record<string, unknown>> implements Sche
     if (!def) {
       throw new KvdbConfigError(`Unknown key: ${keyName}`);
     }
-    const param = keyValue === null || keyValue === undefined ? null
-      : def.type === "json" ? JSON.stringify(keyValue)
-      : def.type === "boolean" ? (keyValue ? 1 : 0)
-      : keyValue;
+    const param =
+      keyValue === null || keyValue === undefined
+        ? null
+        : def.type === "json"
+        ? JSON.stringify(keyValue)
+        : def.type === "boolean"
+        ? keyValue
+          ? 1
+          : 0
+        : keyValue;
 
-    const row = this.database.prepare(`SELECT * FROM ${this.table} WHERE ${keyName} = ?`).get(param) as Record<string, unknown> | undefined;
+    let stmt = this.statements.getBy.get(keyName);
+    if (!stmt) {
+      stmt = this.database.prepare(
+        `SELECT * FROM ${quoteIdent(this.table)} WHERE ${quoteIdent(keyName)} = ?`,
+      );
+      this.statements.getBy.set(keyName, stmt);
+    }
+
+    const row = stmt.get(param) as Record<string, unknown> | undefined;
     if (!row) return undefined;
     const expiry = row.expires_at as number | null;
     if (expiry !== null && expiry <= Date.now()) {
@@ -432,10 +588,14 @@ class SqliteSchemaTable<Columns extends Record<string, unknown>> implements Sche
     const columns: Record<string, unknown> = {};
     for (const [name, definition] of Object.entries(this.secondaryKeys)) {
       const raw = row[name];
-      columns[name] = raw === null ? null
-        : definition.type === "json" && typeof raw === "string" ? JSON.parse(raw)
-        : definition.type === "boolean" ? Boolean(raw)
-        : raw;
+      columns[name] =
+        raw === null
+          ? null
+          : definition.type === "json" && typeof raw === "string"
+          ? JSON.parse(raw)
+          : definition.type === "boolean"
+          ? Boolean(raw)
+          : raw;
     }
     return {
       key: row[pk] as string | number,
@@ -445,21 +605,48 @@ class SqliteSchemaTable<Columns extends Record<string, unknown>> implements Sche
     };
   }
 
+  updateRecord(
+    key: string | number,
+    mutate: (
+      current:
+        | {
+            key: string | number;
+            value: string;
+            columns: Record<string, unknown>;
+            expiresAt?: number;
+          }
+        | undefined,
+    ) => UpdateResult,
+  ): void {
+    const run = this.database.transaction((k: string | number) => {
+      const current = this.getRecord(k);
+      const result = mutate(current);
+      const cols = current ? current.columns : {};
+      this.setRecord(k, result.value, cols, result.ttlMs);
+    });
+    run.immediate(key);
+  }
+
   delete(key: string | number): boolean {
     const pk = this.pkName;
-    return this.database.prepare(`DELETE FROM ${this.table} WHERE ${pk} = ?`).run(key).changes > 0;
+    return this.statements.delete.run(key).changes > 0;
   }
 
   clear(): void {
-    this.database.exec(`DELETE FROM ${this.table}`);
+    this.database.exec(`DELETE FROM ${quoteIdent(this.table)}`);
   }
 
-  find(where: QueryNode, options: FindOptions = {}): Array<{ key: string | number; value: string; columns: Record<string, unknown> }> {
+  find(
+    where: QueryNode,
+    options: FindOptions = {},
+  ): Array<{ key: string | number; value: string; columns: Record<string, unknown> }> {
     validateQueryColumns(where, this.schema);
     const dialect = new SqliteDialect("value");
     const compiled = compileWhere(where, dialect);
     const params: unknown[] = [Date.now(), ...compiled.params];
-    let sql = `SELECT * FROM ${this.table} WHERE (expires_at IS NULL OR expires_at > ?) AND (${compiled.sql})`;
+    let sql = `SELECT * FROM ${quoteIdent(
+      this.table,
+    )} WHERE ("expires_at" IS NULL OR "expires_at" > ?) AND (${compiled.sql})`;
     if (options.sort?.length) sql += ` ORDER BY ${compileOrderBy(options.sort, dialect)}`;
     if (options.limit !== undefined) {
       sql += " LIMIT ?";
@@ -475,10 +662,14 @@ class SqliteSchemaTable<Columns extends Record<string, unknown>> implements Sche
       const columns: Record<string, unknown> = {};
       for (const [name, definition] of Object.entries(this.secondaryKeys)) {
         const raw = row[name];
-        columns[name] = raw === null ? null
-          : definition.type === "json" && typeof raw === "string" ? JSON.parse(raw)
-          : definition.type === "boolean" ? Boolean(raw)
-          : raw;
+        columns[name] =
+          raw === null
+            ? null
+            : definition.type === "json" && typeof raw === "string"
+            ? JSON.parse(raw)
+            : definition.type === "boolean"
+            ? Boolean(raw)
+            : raw;
       }
       return {
         key: row[pk] as string | number,
@@ -492,20 +683,26 @@ class SqliteSchemaTable<Columns extends Record<string, unknown>> implements Sche
     const evolved = evolveSchemaAddKey(this.schema, name, definition);
     if (schemasEqual(this.schema, evolved)) return;
 
-    const colSql = `${name} ${sqliteType(definition.type)}${definition.nullable === false ? " NOT NULL" : ""}${definition.default !== undefined ? ` DEFAULT ${sqlDefault(definition.default)}` : ""}`;
-    this.database.exec(`ALTER TABLE ${this.table} ADD COLUMN ${colSql}`);
+    const colSql = `${quoteIdent(name)} ${sqliteType(definition.type)}${
+      definition.nullable === false ? " NOT NULL" : ""
+    }${definition.default !== undefined ? ` DEFAULT ${sqlDefault(definition.default)}` : ""}`;
+    this.database.exec(`ALTER TABLE ${quoteIdent(this.table)} ADD COLUMN ${colSql}`);
 
     if (definition.index) {
       const idxOpts = typeof definition.index === "object" ? definition.index : {};
       const idxName = idxOpts.name ?? `${this.table}_${name}_idx`;
-      this.database.exec(`CREATE ${idxOpts.unique ? "UNIQUE " : ""}INDEX IF NOT EXISTS ${idxName} ON ${this.table} (${name})`);
+      this.database.exec(
+        `CREATE ${idxOpts.unique ? "UNIQUE " : ""}INDEX IF NOT EXISTS ${quoteIdent(
+          idxName,
+        )} ON ${quoteIdent(this.table)} (${quoteIdent(name)})`,
+      );
     }
 
     this.schema = evolved as unknown as TableSchema<Columns>;
-    this.database.prepare("UPDATE kvdb_schema_registry SET schema_json = ? WHERE logical_name = ?").run(
-      JSON.stringify(this.schema),
-      this.logicalName,
-    );
+    this.database
+      .prepare("UPDATE kvdb_schema_registry SET schema_json = ? WHERE logical_name = ?")
+      .run(JSON.stringify(this.schema), this.logicalName);
+    this.buildStatements();
   }
 
   addIndex(definition: TableIndexDefinition | MultiKeyIndexDefinition): void {
@@ -514,13 +711,16 @@ class SqliteSchemaTable<Columns extends Record<string, unknown>> implements Sche
 
     const cols = definition.keys ?? definition.columns ?? [];
     const idxName = definition.name ?? `${this.table}_${cols.join("_")}_idx`;
-    this.database.exec(`CREATE ${definition.unique ? "UNIQUE " : ""}INDEX IF NOT EXISTS ${idxName} ON ${this.table} (${cols.join(",")})`);
+    this.database.exec(
+      `CREATE ${definition.unique ? "UNIQUE " : ""}INDEX IF NOT EXISTS ${quoteIdent(
+        idxName,
+      )} ON ${quoteIdent(this.table)} (${cols.map(quoteIdent).join(",")})`,
+    );
 
     this.schema = evolved as unknown as TableSchema<Columns>;
-    this.database.prepare("UPDATE kvdb_schema_registry SET schema_json = ? WHERE logical_name = ?").run(
-      JSON.stringify(this.schema),
-      this.logicalName,
-    );
+    this.database
+      .prepare("UPDATE kvdb_schema_registry SET schema_json = ? WHERE logical_name = ?")
+      .run(JSON.stringify(this.schema), this.logicalName);
   }
 }
 
@@ -558,4 +758,11 @@ function sqlDefault(value: unknown): string { if (typeof value === "string") ret
 /** Escape LIKE wildcards so a user prefix is matched literally (ESCAPE '\'). */
 function escapeLike(prefix: string): string {
   return prefix.replace(/[\\%_]/g, (char) => `\\${char}`);
+}
+
+function quoteIdent(value: string): string {
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(value)) {
+    throw new KvdbConfigError(`Invalid SQL identifier: ${JSON.stringify(value)}`);
+  }
+  return `"${value}"`;
 }

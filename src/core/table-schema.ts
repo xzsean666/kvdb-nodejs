@@ -97,7 +97,20 @@ export type InferKeysRecord<T extends Record<string, KeyDefinition>> = {
 };
 
 const IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/;
-const RESERVED = new Set(["value", "expires_at", "created_at", "updated_at"]);
+const RESERVED = new Set([
+  "value",
+  "expires_at",
+  "created_at",
+  "updated_at",
+  "_id",
+  "__proto__",
+  "constructor",
+  "prototype",
+]);
+
+function isReserved(name: string): boolean {
+  return RESERVED.has(name.toLowerCase());
+}
 
 export interface NormalizedSchema {
   primaryKey: { name: string; type: PrimaryKeyType };
@@ -115,21 +128,22 @@ export function normalizeTableSchema(schema: TableSchema | MultiKeySchema): Norm
   const pkName = schema.primaryKey?.name ?? "key";
   const pkType: PrimaryKeyType = schema.primaryKey?.type ?? "string";
   const rawKeys = schema.keys ?? schema.columns ?? {};
+  const clonedKeys: Record<string, KeyDefinition> = { ...rawKeys };
 
   const indexes = (schema.indexes ?? []).map((idx) => {
     const cols = idx.keys ?? idx.columns ?? [];
     return {
       name: idx.name,
-      keys: cols,
-      columns: cols,
+      keys: [...cols],
+      columns: [...cols],
       unique: idx.unique,
     };
   });
 
   return {
     primaryKey: { name: pkName, type: pkType },
-    keys: rawKeys,
-    columns: rawKeys,
+    keys: clonedKeys,
+    columns: clonedKeys,
     indexes,
     version: schema.version ?? 1,
   };
@@ -142,7 +156,7 @@ export function validateMultiKeySchema(schema: TableSchema | MultiKeySchema): vo
   if (!IDENTIFIER.test(pkName)) {
     throw new KvdbSchemaError(`Invalid primary key name: ${pkName}`);
   }
-  if (RESERVED.has(pkName)) {
+  if (isReserved(pkName)) {
     throw new KvdbSchemaError(`Primary key cannot use reserved word: ${pkName}`);
   }
   if (pkType !== "string" && pkType !== "integer") {
@@ -159,7 +173,7 @@ export function validateMultiKeySchema(schema: TableSchema | MultiKeySchema): vo
     if (!IDENTIFIER.test(name)) {
       throw new KvdbSchemaError(`Invalid key name: ${name}`);
     }
-    if (RESERVED.has(name)) {
+    if (isReserved(name)) {
       throw new KvdbSchemaError(`Key name cannot use reserved word: ${name}`);
     }
     if (!["string", "integer", "number", "boolean", "json"].includes(definition.type)) {
@@ -260,11 +274,16 @@ export function evolveSchemaAddKey(
   if (!IDENTIFIER.test(name)) {
     throw new KvdbSchemaError(`Invalid key name: ${name}`);
   }
-  if (RESERVED.has(name)) {
+  if (isReserved(name)) {
     throw new KvdbSchemaError(`Key name cannot use reserved word: ${name}`);
   }
   if (name === norm.primaryKey.name) {
     throw new KvdbSchemaError(`Key "${name}" conflicts with primary key name`);
+  }
+  if (definition.nullable === false && definition.default === undefined) {
+    throw new KvdbSchemaError(
+      `Cannot add required key "${name}" without a default value during schema evolution`,
+    );
   }
   if (!["string", "integer", "number", "boolean", "json"].includes(definition.type)) {
     throw new KvdbSchemaError(`Invalid key type for ${name}: ${definition.type}`);

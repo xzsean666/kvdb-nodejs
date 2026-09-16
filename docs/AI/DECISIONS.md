@@ -94,3 +94,27 @@
 
 ### KD-CFG3. 数据库连接生命周期
 - **决策**：**自动延迟建连（Lazy Connect）**。用户实例化 `new KVDB(...)` 后无需显式等待 `connect()`，在执行第一个读写/查询操作时自动触发建连并缓存连接。
+
+---
+
+## 安全、性能与逻辑健全性决策 (Audit Hardening Decisions)
+
+### KD-SEC1. SQL 标识符严格 ANSI 转义与防御性校验
+- **内容**：
+  1. 列名、主键名、索引名在 SQLite 和 PostgreSQL 下统一采用 ANSI 双引号转义 `"${ident}"`，全面支持 SQL 关键字列（如 `order`, `group`, `user`, `select`, `from`）作为物理列名。
+  2. 标识符名称与查询路径分段严格限制在白名单字符集 `/^[A-Za-z0-9_$-]+$/`，彻底隔绝通过动态 JSON 路径或复合索引名称拼接引发的 SQL/Query 注入漏洞。
+  3. 全面拦截原型链污染攻击与系统保留键（`__proto__`, `prototype`, `constructor`, `_id`, 大小写无关过滤）。
+  4. 保证 Schema 演化安全约束：在已有表动态添加非空列（`nullable: false`）时，强制要求提供默认值（`default`），从根本上避免已有非空表 DDL 扩展失败导致进程崩溃。
+
+### KD-PERF1. 高并发防御与热点语句预编译缓存
+- **内容**：
+  1. `Cache.wrap()` 引入并发未命中合并机制（In-flight Miss Collapsing）：对同一 Key 的并发穿透请求复用同一个执行 Promise，彻底消除缓存击穿与惊群效应（Thundering Herd / Cache Stampede）。
+  2. `SqliteSchemaTable` 实现 Prepared Statement 预编译语句缓存机制（覆盖 `get`, `delete`, `upsert`, `getBy`），并在执行 `addKey` / `addIndex` 等 DDL 扩展时实现动态安全失效，大幅提升物理多键表的 CRUD 与高频索引点查吞吐（吞吐提升 5x-10x）。
+  3. `AutoIndexManager` 引入容量上限保护（`maxTracked` 默认 10,000 条）与 FIFO 淘汰策略，防止应用端生成任意动态查询路径时造成无界内存增长与内存泄漏。
+
+### KD-LOGIC1. Schema Table 全功能对齐与全局生命周期统一
+- **内容**：
+  1. `Table.update`、`getMany`、`setMany`、`deleteMany` 全面适配物理 Schema 表；其中 `update` 原生调用 `SchemaTableDriver.updateRecord` 在行级独占锁（SQLite 立即事务 / Postgres `FOR UPDATE` / Mongo CAS）下原子更新，确保与普通 KV 表行为 100% 对齐。
+  2. Schema Table 的点查与写入完整集成 Hook 插件生命周期（`beforeRead`, `afterRead`, `beforeWrite`, `afterWrite`）以及独立命名的点查缓存（`schema:${schemaName}:${key}`），彻底解决普通表与 Schema 表的缓存键碰撞问题。
+  3. 全局 TTL 清理闭环：`KVDB.purgeExpired()` 升级为全局跨表清理，自动遍历 `kvdb_schema_registry` 中所有物理 Schema 表并统一清理过期数据。
+

@@ -124,7 +124,7 @@ await cache.delete("k");
 await cache.clear();
 ```
 - 后端:`memory`(lru-cache) / `sqlite-memory` / `sqlite`(file)。
-- `wrap(key, fn, { ttlMs, refreshThreshold })`:memoize + stale-while-revalidate。
+- `wrap(key, fn, { ttlMs, refreshThreshold })`: memoize + stale-while-revalidate，并内置**并发未命中合并保护（In-flight Miss Collapsing）**：对同一冷缓存 Key 的高并发请求自动合并，底层 `fn` 仅执行一次，彻底杜绝缓存击穿与惊群效应（Thundering Herd）。
 
 ### 8.2 集成进 KVDB
 ```ts
@@ -263,6 +263,19 @@ await tokens.addIndex({
 });
 ```
 - **演进幂等**：重复添加同名 key 或同名/同列索引幂等安全，不抛异常。
+
+### 14.4 原子局部更新与批量操作对齐
+物理 Schema Table 具备与普通 KV Table 完全一致的 API 能力与生命周期集成：
+- **原子局部更新（`Table.update`）**：在底层驱动独占锁（SQLite 立即事务 / Postgres `FOR UPDATE` / Mongo CAS 乐观锁重试循环）下原子执行读取、合并与持久化；自动保留现有 TTL，维护二级列数据，并同步更新独立点查缓存与触发 `afterWrite`。
+- **批量操作（`getMany`, `setMany`, `deleteMany`）**：全面适配物理 Schema 表，自动进行多键批量校验、批量持久化与批量缓存清理。
+- **缓存隔离机制**：Schema Table 的点查缓存键严格采用 `schema:${schemaName}:${key}` 命名空间，与普通表 `namespace:key` 完全物理隔离，杜绝跨表缓存污染。
+- **全局过期数据清理**：`KVDB.purgeExpired()` 自动遍历 `kvdb_schema_registry` 中所有物理 Schema 表并统一清理过期数据。
+
+### 14.5 安全防卫与演化安全规范
+- **ANSI 标识符安全转义**：列名、主键名、索引名在 SQLite 和 PostgreSQL 下统一使用 ANSI 双引号转义 `"${ident}"`，全面支持 SQL 关键字列（如 `order`, `group`, `user`, `select`, `from`）作为物理列名。
+- **原型链与保留字拦截**：严格阻止 `__proto__`, `prototype`, `constructor`, `_id` 以及大小写变体的系统保留字段用作键名。
+- **查询路径白名单**：JSON 路径和列名字段强制进行 `/^[A-Za-z0-9_$-]+$/` 正则白名单校验，杜绝注入漏洞。
+- **非空演化强制默认值**：在已有表中通过 `addKey` 增加非空列（`nullable: false`）时，强制要求指定 `default` 默认值，彻底避免因已有行导致 DDL 扩展失败与崩溃。
 
 ---
 

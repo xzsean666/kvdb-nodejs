@@ -16,6 +16,7 @@ import type {
   DriverCapabilities,
   ProviderName,
   UpdateMutator,
+  UpdateResult,
   SchemaTableDriver,
 } from "../types.js";
 import type { KVEntry, RawEntry } from "../../cache/types.js";
@@ -282,10 +283,34 @@ export class MongoDriver implements Driver {
   }
 
   async purgeExpired(): Promise<number> {
-    const result = await this.collection.deleteMany({
-      expiresAt: { $ne: null, $lte: Date.now() },
-    });
-    return result.deletedCount;
+    const now = Date.now();
+    let total = (
+      await this.collection.deleteMany({
+        expiresAt: { $ne: null, $lte: now },
+      })
+    ).deletedCount;
+
+    try {
+      const registry = this.db.collection<{ _id: string; schema_json: string }>(
+        "kvdb_schema_registry",
+      );
+      const allSchemas = await registry.find({}).toArray();
+      for (const s of allSchemas) {
+        try {
+          const coll = this.db.collection(schemaCollectionName(s._id));
+          const res = await coll.deleteMany({
+            expiresAt: { $ne: null, $lte: now },
+          });
+          total += res.deletedCount;
+        } catch {
+          // Ignore if collection dropped or missing
+        }
+      }
+    } catch {
+      // Ignore registry error
+    }
+
+    return total;
   }
 
   raw(): Db {
@@ -423,11 +448,28 @@ class MongoSchemaTable<Columns extends Record<string, unknown>> implements Schem
     };
   }
 
-  async getRecordByKey(keyName: string, keyValue: unknown): Promise<{ key: string | number; value: string; columns: Record<string, unknown>; expiresAt?: number } | undefined> {
-    const query = (keyName === this.pkName || keyName === "_id")
-      ? { _id: keyValue as any }
-      : { [keyName]: keyValue };
-    const doc = await this.collection.findOne(query as any);
+  async getRecordByKey(
+    keyName: string,
+    keyValue: unknown,
+  ): Promise<
+    | {
+        key: string | number;
+        value: string;
+        columns: Record<string, unknown>;
+        expiresAt?: number;
+      }
+    | undefined
+  > {
+    const pk = this.pkName;
+    if (keyName === pk || keyName === "_id") {
+      return this.getRecord(keyValue as string | number);
+    }
+    const def = this.secondaryKeys[keyName];
+    if (!def) {
+      throw new KvdbConfigError(`Unknown key: ${keyName}`);
+    }
+
+    const doc = await this.collection.findOne({ [keyName]: keyValue } as any);
     if (!doc) return undefined;
     const expiresAt = (doc.expiresAt as number | null) ?? undefined;
     if (expiresAt !== undefined && expiresAt <= Date.now()) {
@@ -440,6 +482,84 @@ class MongoSchemaTable<Columns extends Record<string, unknown>> implements Schem
       columns: this.extractColumns(doc),
       expiresAt,
     };
+  }
+
+  async updateRecord(
+    key: string | number,
+    mutate: (
+      current:
+        | {
+            key: string | number;
+            value: string;
+            columns: Record<string, unknown>;
+            expiresAt?: number;
+          }
+        | undefined,
+    ) => UpdateResult,
+  ): Promise<void> {
+    const pk = this.pkName;
+    for (let attempt = 0; attempt < MAX_UPDATE_ATTEMPTS; attempt++) {
+      const now = Date.now();
+      const doc = await this.collection.findOne({ _id: key as any });
+      let current:
+        | {
+            key: string | number;
+            value: string;
+            columns: Record<string, unknown>;
+            expiresAt?: number;
+          }
+        | undefined;
+      if (doc !== null) {
+        const expiresAt = (doc.expiresAt as number | null) ?? undefined;
+        if (expiresAt === undefined || expiresAt > now) {
+          current = {
+            key: this.parsePk(doc._id),
+            value: doc.value as string,
+            columns: this.extractColumns(doc),
+            expiresAt,
+          };
+        }
+      }
+      const next = mutate(current);
+      const docToSet: Record<string, unknown> = {
+        _id: key,
+        value: next.value,
+        doc: deserialize(next.value),
+        expiresAt: expiresAtFromTtl(next.ttlMs, now) ?? null,
+        updatedAt: now,
+      };
+      if (pk !== "_id") {
+        docToSet[pk] = key;
+      }
+      const cols = current ? current.columns : {};
+      for (const [name, def] of Object.entries(this.secondaryKeys)) {
+        const val = cols[name];
+        if (val === undefined) {
+          docToSet[name] = def.default !== undefined ? def.default : null;
+        } else {
+          docToSet[name] = val;
+        }
+      }
+      if (current === undefined) {
+        await this.collection.updateOne(
+          { _id: key as any },
+          {
+            $set: docToSet,
+            $setOnInsert: { createdAt: now },
+          },
+          { upsert: true },
+        );
+        return;
+      }
+      const result = await this.collection.updateOne(
+        { _id: key as any, value: current.value },
+        { $set: docToSet },
+      );
+      if (result.matchedCount === 1) return;
+    }
+    throw new KvdbConnectionError(
+      `updateRecord("${key}") exceeded ${MAX_UPDATE_ATTEMPTS} attempts under write contention`,
+    );
   }
 
   async delete(key: string | number): Promise<boolean> {
@@ -546,5 +666,5 @@ function simpleHash(value: string): string {
 
 /** Escape a literal prefix for use inside a Mongo $regex anchor. */
 function escapeRegex(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return value.replace(/[-[\]{}()*+?.,\\^$|#\s]/g, "\\$&");
 }

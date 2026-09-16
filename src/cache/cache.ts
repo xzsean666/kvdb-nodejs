@@ -68,6 +68,7 @@ export class Cache {
   private readonly stores: KVStore[];
   private readonly defaultTtlMs: number | undefined;
   private readonly refreshing = new Set<string>();
+  private readonly inFlightMisses = new Map<string, Promise<unknown>>();
 
   constructor(options: CacheOptions = {}) {
     const specs =
@@ -113,9 +114,24 @@ export class Cache {
       }
       return value;
     }
-    const value = await fn();
-    await this.set(key, value, options.ttlMs);
-    return value;
+
+    const inFlight = this.inFlightMisses.get(key);
+    if (inFlight !== undefined) {
+      return inFlight as Promise<V>;
+    }
+
+    const promise = (async () => {
+      try {
+        const value = await fn();
+        await this.set(key, value, options.ttlMs);
+        return value;
+      } finally {
+        this.inFlightMisses.delete(key);
+      }
+    })();
+
+    this.inFlightMisses.set(key, promise);
+    return promise;
   }
 
   /** Read the first live entry across tiers, backfilling higher (closer) tiers. */
