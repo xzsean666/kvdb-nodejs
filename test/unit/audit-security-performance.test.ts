@@ -334,4 +334,123 @@ describe("Comprehensive Audit: Security, Performance & Soundness", () => {
       expect(toIndex15).toEqual(["path_15"]);
     });
   });
+
+  describe("10. Soundness: Cache Fill-on-Read Preserves Remaining TTL", () => {
+    it("backfills cache with remaining TTL so cached entries expire alongside DB rows", async () => {
+      const cache = new Cache({ driver: "memory" });
+      const db = new KVDB({
+        driver: "sqlite",
+        url: ":memory:",
+        cache,
+      });
+
+      const items = db.table<{ name: string }>("ttl_items");
+
+      // Write with 80ms TTL
+      await items.set("k1", { name: "Temp" }, { ttlMs: 80 });
+
+      // First read: reads from DB, backfills cache with remaining TTL (~80ms)
+      const firstGet = await items.get("k1");
+      expect(firstGet).toEqual({ name: "Temp" });
+
+      // Check that cache has it
+      const cachedKey = "ttl_items:k1";
+      expect(await cache.get(cachedKey)).toEqual({ name: "Temp" });
+
+      // Wait 120ms for both DB and cache to expire
+      await new Promise((r) => setTimeout(r, 120));
+
+      // Second read: should be undefined (cache must not return stale expired value)
+      const secondGet = await items.get("k1");
+      expect(secondGet).toBeUndefined();
+      expect(await cache.get(cachedKey)).toBeUndefined();
+
+      await db.close();
+    });
+  });
+
+  describe("11. Performance: Schema Table Batch setMany/deleteMany and Cache Sync", () => {
+    it("executes batch operations atomically and syncs cache", async () => {
+      const db = new KVDB({
+        driver: "sqlite",
+        url: ":memory:",
+        cache: { driver: "memory" },
+      });
+
+      const metrics = db.table<{ value: number }>("metrics", {
+        schema: {
+          primaryKey: { name: "id", type: "integer" },
+          keys: {
+            host: { type: "string", index: true },
+          },
+        },
+      });
+
+      // Batch set 50 items
+      const batch = Array.from({ length: 50 }, (_, i) => ({
+        key: i + 1,
+        value: { value: i * 10 },
+        keys: { host: `server-${i % 5}` },
+      }));
+
+      await metrics.setMany(batch);
+
+      // Verify all items are accessible
+      const fetched = await metrics.getMany([1, 25, 50]);
+      expect(fetched[0]).toEqual({ value: 0 });
+      expect(fetched[1]).toEqual({ value: 240 });
+      expect(fetched[2]).toEqual({ value: 490 });
+
+      // Verify batch delete
+      const deleted = await metrics.deleteMany([1, 25]);
+      expect(deleted).toBe(2);
+
+      const afterDelete = await metrics.getMany([1, 25, 50]);
+      expect(afterDelete[0]).toBeUndefined();
+      expect(afterDelete[1]).toBeUndefined();
+      expect(afterDelete[2]).toEqual({ value: 490 });
+
+      await db.close();
+    });
+  });
+
+  describe("12. Soundness: AutoIndexManager Namespace Scoping", () => {
+    it("scopes autoIndex counts per namespace so different tables do not collide", async () => {
+      const db = new KVDB({
+        driver: "sqlite",
+        url: ":memory:",
+        autoIndex: { threshold: 3 },
+      });
+
+      const users = db.table("users");
+      const orders = db.table("orders");
+
+      // Query "status" on users 2 times (under threshold 3)
+      await users.find({ where: { status: "active" } });
+      await users.find({ where: { status: "active" } });
+
+      // Query "status" on orders 2 times (under threshold 3)
+      await orders.find({ where: { status: "pending" } });
+      await orders.find({ where: { status: "pending" } });
+
+      // If counts were un-scoped, total "status" count would be 4 (> threshold 3).
+      // Because counts are scoped (users::status and orders::status each have count 2),
+      // neither has triggered ensureIndex yet.
+      const sqliteDb = (await db.raw()) as any;
+      const indexesUsers = sqliteDb
+        .prepare("SELECT name FROM sqlite_master WHERE type='index' AND name LIKE '%status%'")
+        .all();
+      expect(indexesUsers).toHaveLength(0);
+
+      // One more query on users triggers its threshold 3
+      await users.find({ where: { status: "active" } });
+
+      const indexesAfter = sqliteDb
+        .prepare("SELECT name FROM sqlite_master WHERE type='index' AND name LIKE '%status%'")
+        .all();
+      expect(indexesAfter.length).toBeGreaterThanOrEqual(1);
+
+      await db.close();
+    });
+  });
 });

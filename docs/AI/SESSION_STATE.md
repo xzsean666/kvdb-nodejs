@@ -7,85 +7,63 @@
 
 ## 1. 核心状态概要
 
-- **当前 Goal**: 全面安全、性能、逻辑健全性审计与生产级修复及文档升级 (TASK-023-AUDIT)
-- **当前 Task**: TASK-023-AUDIT 全面安全/性能/逻辑审计与生产级修复及文档升级
-- **当前状态**: **DONE** (代码审计、生产级漏洞修复、性能优化、逻辑闭环、新增综合测试套件、文档全面升级均已 100% 交付)
+- **当前 Goal**: 深度性能与逻辑合理性优化（适度优化、高性价比、严防过度设计） (TASK-024-OPT)
+- **当前 Task**: TASK-024-OPT 性能吞吐提升与逻辑健全性闭环
+- **当前状态**: **DONE** (181 项全量测试 100% 通过；21 个官方示例全量运行成功；类型检查与构建全绿)
 
 ---
 
-## 2. 本次会话完成内容（TASK-023-AUDIT 深度审计与生产级加固）
+## 2. 本次会话完成内容（适度高性价比优化落地）
 
-1. **安全加固 (Security Hardening)**:
-   - **SQL 标识符 ANSI 转义**: SQLite 和 PostgreSQL 物理 Schema 表的列名、主键名、复合索引名统一使用 ANSI 标准双引号 `"${ident}"` 转义，支持 SQL 关键字列（如 `order`, `group`, `user`, `from`, `select`, `type`, `key` 等）作为合法物理列名与索引名。
-   - **查询与路径防注入**: `src/query/parser.ts` 中的 `parsePath` 和 `parseColumnField` 强制加入正则白名单校验 `/^[A-Za-z0-9_$-]+$/`，杜绝恶意构造的分号、单引号与 SQL 注入字符穿透。
-   - **原型链污染拦截**: `src/core/table-schema.ts` 拦截 `__proto__`, `prototype`, `constructor`, `_id` 等潜在污染字段与系统保留字段，并支持大小写无关匹配。
-   - **Schema 演化非空约束**: 在 `evolveSchemaAddKey` 中，增加针对已有表添加非空列（`nullable: false`）的安全限制，强制要求提供 `default` 默认值，消除底层已有行执行 DDL 导致的崩溃隐患。
+1. **缓存 TTL 读回填精准同步 (Cache Read-Through TTL Soundness)**:
+   - 修复问题：此前 `Table.get` 在缓存未命中读底层 DB 后回填 Cache 时，未传递 `ttlMs`，导致底层有 TTL 的数据在 Cache 中变成了永久有效或回退至系统默认过期时间。
+   - 优化落地：引入 `ttlFromExpiry(entry.expiresAt)` 精确计算行记录的剩余生存毫秒数（保证剩余有效毫秒数至少为 1ms），回填 Cache 时精确透传，保证 DB 过期与 Cache 过期毫秒级严格同步。
 
-2. **性能与高可用优化 (Performance & Concurrency Protection)**:
-   - **缓存穿透与惊群防御 (Cache Stampede / Thundering Herd Prevention)**: 在 `Cache.wrap` 中引入 `inFlightMisses` 追踪机制，并发冷缓存未命中时合并为一个 Promise 执行，底层异步计算函数仅执行一次，避免高并发穿透数据库。
-   - **SQLite 预编译语句缓存 (Prepared Statement Caching)**: 在 `SqliteSchemaTable` 中实现语句缓存池（覆盖 `getRecord`, `getRecordByKey`, `setRecord`, `delete`），在动态执行 `addKey` / `addIndex` 时实现动态失效重建，将 SQLite 多键点查与写入吞吐提升 5~10 倍。
-   - **自动索引内存边界保护**: 在 `AutoIndexManager` 中引入 `maxTracked` (默认 10,000 条) 与 FIFO 淘汰策略，杜绝任意动态高基数查询路径导致内存无限膨胀泄漏。
+2. **物理 Schema 表批量操作事务加速 (Batch setMany/deleteMany Performance)**:
+   - 修复问题：此前 Schema 表调用 `setMany` / `deleteMany` 逐条执行底层 `setRecord` / `delete`，在 SQLite 等磁盘引擎下引起 N 次事务提交与磁盘 fsync 放大。
+   - 优化落地：在 `SchemaTableDriver` 契约中扩展 `setRecords` 与 `deleteRecords` 接口；在 `SqliteSchemaTable` 中基于单事务原子批量执行，并将写事务与删事务函数缓存到实例成员中复用；在上层 `Table.setMany` / `Table.deleteMany` 自动检测并优先走驱动层单事务批处理，同时批量维护/失效 Cache。
 
-3. **逻辑一致性与生命周期闭环 (Logic Parity & Soundness)**:
-   - **Schema Table 核心 API 闭环**:
-     - `Table.update`：全面适配 Schema 表，驱动层提供 `updateRecord` 接口，分别在 SQLite 立即事务、Postgres `FOR UPDATE` 行级独占锁和 Mongo CAS 乐观重试循环下保证原子读改写。
-     - `Table.getMany`, `setMany`, `deleteMany`：全面适配 Schema 表，正确维护物理列与索引。
-     - `Table.getByPrefix`, `deleteByPrefix`：针对 Schema 表进行显式保护，抛出友好的 `UNSUPPORTED` 错误而不是静默穿透。
-   - **缓存与生命周期隔离**:
-     - 普通 KV 表缓存 key 为 `namespace:key`；物理 Schema 表缓存 key 为 `schema:${schemaName}:${key}`，彻底杜绝跨表缓存击穿与键名碰撞。
-     - Schema 表的写入与读取操作完整触发插件钩子（`beforeRead`, `afterRead`, `beforeWrite`, `afterWrite`）。
-   - **全局过期清理**: `KVDB.purgeExpired()` 升级为全局跨物理表清理，自动遍历 `kvdb_schema_registry` 中所有物理 Schema 表并批量删除过期行。
+3. **SQLite 语句预编译与事务函数缓存 (Statement & Transaction Caching)**:
+   - 修复问题：`SqliteDriver` 的 `getByPrefix` 与 `deleteByPrefix` 原先每次调用均执行 `database.prepare` 动态编译，且 `transaction(...)` 每次调用都在 V8 堆上分配闭包包装函数，在高并发与 Node.js 24 下产生额外 GC 停顿与析构压力。
+   - 优化落地：将 `getByPrefix` 和 `deleteByPrefix` 提升至构造器中预编译（`this.statements`）；在驱动实例级别懒加载并缓存 `writeAll`、`deleteAll`、`writeAllRecords`、`deleteAllRecords` 事务包装函数，消除重复编译与频繁闭包分配。
 
-4. **测试与文档升级 (Verification & Documentation)**:
-   - 新增 `test/unit/audit-security-performance.test.ts`，涵盖上述所有安全、性能与逻辑修复的 11 项针对性测试。
-   - 全量测试套件增至 **178 项，全部通过 (100%)**。
-   - `pnpm typecheck` 0 错误；`pnpm build` 成功。
-   - `pnpm examples` 16 个实战示例全部成功运行。
-   - 同步更新 `docs/SPEC.md`（Section 8.1, 14.4, 14.5）、`docs/AI/DECISIONS.md`（KD-SEC1, KD-PERF1, KD-LOGIC1）、`docs/AI/TASK_INDEX.md` 与 `docs/AI/tasks/TASK-023-AUDIT.md`。
+4. **PostgresDriver 核心表名 ANSI 转义 (Postgres Quoting Soundness)**:
+   - 优化落地：对 `PostgresDriver` 基础 KV 表的所有原生查询表名添加 ANSI 双引号转义 `"${this.table}"`，支持诸如 `user`, `order`, `group`, `session` 等 SQL 保留字或大写表名作为 KV 表。
+
+5. **AutoIndexManager 跨表命名空间隔离 (Namespace Scoping)**:
+   - 修复问题：此前 `AutoIndexManager` 路径统计使用单纯属性名（如 `"status"`），导致不同表若拥有同名属性会相互累加查询计数，引发非预期的索引提前创建。
+   - 优化落地：统计键增加 `${this.namespace}::` 命名空间前缀隔离，各表热度统计完全互不干扰。
 
 ---
 
-## 3. 修改、创建与删除的文件
+## 3. 修改的文件
 
-### 新建文件 (Created Files)
-- `test/unit/audit-security-performance.test.ts` (审计安全、性能与健全性针对性测试)
-- `docs/AI/tasks/TASK-023-AUDIT.md` (审计专项任务规格与验收记录)
-
-### 修改文件 (Modified Files)
-- `src/core/table-schema.ts` (保留字与原型链防护、非空演进默认值约束)
-- `src/core/table.ts` (Schema 表与普通表缓存命名空间隔离、update/batch 操作闭环、Hook 集成)
-- `src/query/parser.ts` (JSON 路径分段白名单校验、导出 parseColumnField)
-- `src/cache/cache.ts` (Cache.wrap 并发未命中合并防御)
-- `src/core/auto-index.ts` (AutoIndexManager 内存上限受控与淘汰)
-- `src/drivers/types.ts` (定义 SchemaTableDriver.updateRecord 与 UpdateResult)
-- `src/drivers/sqlite/sqlite-driver.ts` (ANSI 引号转义、预编译语句缓存、原子 updateRecord、全局跨表 purgeExpired)
-- `src/drivers/postgres/postgres-driver.ts` (列名引号转义、行级锁 updateRecord、全局跨表 purgeExpired)
-- `src/drivers/mongodb/mongodb-driver.ts` (键名合法性校验、CAS 乐观锁 updateRecord、全局跨集合 purgeExpired)
-- `docs/SPEC.md` (升级 SWR 并发保护、Schema 表原子更新与批量规范、安全规范)
-- `docs/AI/DECISIONS.md` (新增 KD-SEC1, KD-PERF1, KD-LOGIC1 架构决策记录)
-- `docs/AI/TASK_INDEX.md` (更新任务索引，标记 TASK-023-AUDIT 为 DONE)
-- `docs/AI/SESSION_STATE.md` (更新当前会话状态)
+- `src/core/table.ts`: Cache 读回填计算剩余 TTL；Schema 表批处理路由与 Cache 同步；AutoIndex 命名空间隔离。
+- `src/drivers/types.ts`: `SchemaTableDriver` 补充 `setRecords` 与 `deleteRecords` 批处理契约。
+- `src/drivers/sqlite/sqlite-driver.ts`: `getByPrefix` / `deleteByPrefix` 预编译；`SqliteDriver` 及 `SqliteSchemaTable` 批量事务缓存复用。
+- `src/drivers/postgres/postgres-driver.ts`: 核心 KV 查询语句表名 ANSI 转义保护。
+- `test/unit/audit-security-performance.test.ts`: 新增 3 项针对性单元测试（Sections 10, 11, 12），覆盖读回填 TTL、Schema 批量事务与 Cache 同步、AutoIndex 命名空间隔离。
+- `docs/AI/SESSION_STATE.md`: 本会话状态与验证结果更新。
 
 ---
 
 ## 4. 验证命令与结果
 
-- `pnpm test`: 178 tests passing (100% 通过)
-- `pnpm typecheck`: 0 errors
-- `pnpm build`: 成功生成 `dist/index.js`, `dist/index.cjs`, `dist/index.d.ts`
-- `pnpm examples`: 全部 16 个实战示例正常执行完毕，无异常退出
+- `pnpm test`: **181 tests passing (100% 通过)**，运行耗时仅 1.16s。
+- `pnpm typecheck`: **0 errors**。
+- `pnpm build`: **构建成功**，输出 `dist/index.js` (119.89 KB), `dist/index.cjs` (123.15 KB), `dist/index.d.ts` (32.17 KB)。
+- `pnpm examples`: **21 个官方实战示例全部成功运行通过 (100%)**。
 
 ---
 
 ## 5. 未解决问题与技术债务
 
 1. **真实 Docker 数据库合规测试**:
-   - PostgreSQL 与 MongoDB 驱动代码及合规测试套件已完整就绪并通过单元/AST 编译测试。真实 Docker 环境下端到端执行作为 Milestone 3 独立任务（TASK-026）跟踪。
+   - PostgreSQL 与 MongoDB 驱动代码及合规测试套件已完整就绪并通过单元/AST 编译测试。真实 Docker 环境下端到端执行作为后续独立环境测试跟踪。
 
 ---
 
-## 6. 下一步应该执行的 Task
+## 6. 下一步规划
 
-- **下一步规划**: 进入 **Milestone 3（生产级功能扩展与生态演进）**
-- **推荐下一个 Task**: `TASK-024: 查询结果缓存 (Query Cache + Write Invalidation)`
-  - 目标：结合 Cache 子系统为 Table.find 提供 AST 哈希缓存与写时自动失效机制。
+- 核心性能优化与逻辑闭环已全部交付，SDK 当前具备极高的吞吐性能、内存安全性与生产级稳定性。
+- 后续可按计划继续推进 Milestone 3（如查询结果缓存 Query Cache、Redis / MySQL 驱动适配等）。

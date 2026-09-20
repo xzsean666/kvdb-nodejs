@@ -31,6 +31,17 @@ export interface SchemaTableDriver<Value = JsonValue, Columns extends Record<str
   delete(key: string | number): MaybePromise<boolean>;
   clear(): MaybePromise<void>;
   find(where: QueryNode, options?: FindOptions): MaybePromise<Array<{ key: string | number; value: string; columns: Record<string, unknown> }>>;
+  /** Optional atomic batch record insertion. */
+  setRecords?(
+    items: Array<{
+      key: string | number;
+      value: string;
+      columns: Record<string, unknown>;
+      ttlMs?: number;
+    }>,
+  ): MaybePromise<void>;
+  /** Optional atomic batch record deletion; returns deleted count. */
+  deleteRecords?(keys: (string | number)[]): MaybePromise<number>;
   /** Dynamically add a secondary key to this physical table and update registry. */
   addKey?(name: string, definition: KeyDefinition): MaybePromise<void>;
   /** Dynamically add an index to this physical table and update registry. */

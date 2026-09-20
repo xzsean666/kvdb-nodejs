@@ -247,14 +247,20 @@ export class Table<Value = JsonValue, Columns extends Record<string, unknown> = 
       const record = await schema.getRecord(key);
       if (record !== undefined) {
         value = deserialize<Value>(record.value);
-        if (this.deps.cache) await this.deps.cache.set(cKey, value);
+        if (this.deps.cache) {
+          const remainingTtl = ttlFromExpiry(record.expiresAt);
+          await this.deps.cache.set(cKey, value, remainingTtl);
+        }
       }
     } else {
       const driver = await this.deps.getDriver();
       const entry = await driver.get(cKey);
       if (entry !== undefined) {
         value = deserialize<Value>(entry.value);
-        if (this.deps.cache) await this.deps.cache.set(cKey, value);
+        if (this.deps.cache) {
+          const remainingTtl = ttlFromExpiry(entry.expiresAt);
+          await this.deps.cache.set(cKey, value, remainingTtl);
+        }
       }
     }
 
@@ -323,12 +329,33 @@ export class Table<Value = JsonValue, Columns extends Record<string, unknown> = 
   ): Promise<void> {
     const schema = await this.schemaDriver();
     if (schema) {
-      for (const item of items) {
-        await this.set(item.key, item.value, {
+      const recordsToSet = items.map((item) => {
+        const rawKeys = (item.keys ?? item.columns) as Record<string, unknown> | undefined;
+        const columns = validateColumnValues(schema.schema, rawKeys);
+        return {
+          key: item.key,
+          value: serialize(item.value),
+          columns,
           ttlMs: item.ttlMs,
-          keys: (item.keys ?? item.columns) as any,
-          columns: item.columns as any,
-        });
+        };
+      });
+      if (schema.setRecords) {
+        await schema.setRecords(recordsToSet);
+      } else {
+        for (const item of recordsToSet) {
+          await schema.setRecord(item.key, item.value, item.columns, item.ttlMs);
+        }
+      }
+      if (this.deps.cache) {
+        await Promise.all(
+          items.map((item) =>
+            this.deps.cache!.set(
+              this.cacheKey(String(item.key), true),
+              item.value,
+              item.ttlMs,
+            ),
+          ),
+        );
       }
       return;
     }
@@ -360,8 +387,17 @@ export class Table<Value = JsonValue, Columns extends Record<string, unknown> = 
     const schema = await this.schemaDriver();
     if (schema) {
       let count = 0;
-      for (const key of keys) {
-        if (await this.delete(key)) count++;
+      if (schema.deleteRecords) {
+        count = await schema.deleteRecords(keys);
+      } else {
+        for (const key of keys) {
+          if (await this.delete(key)) count++;
+        }
+      }
+      if (this.deps.cache) {
+        await Promise.all(
+          keys.map((key) => this.deps.cache!.delete(this.cacheKey(String(key), true))),
+        );
       }
       return count;
     }
@@ -437,7 +473,9 @@ export class Table<Value = JsonValue, Columns extends Record<string, unknown> = 
 
     if (this.deps.autoIndex) {
       const paths = collectFieldPaths(parsed.where, parsed.options?.sort);
-      for (const path of this.deps.autoIndex.record(paths)) {
+      const scopedPaths = paths.map((path) => `${this.namespace}::${path}`);
+      for (const scopedPath of this.deps.autoIndex.record(scopedPaths)) {
+        const path = scopedPath.slice(this.namespace.length + 2);
         await driver.ensureIndex(path);
       }
     }
@@ -581,5 +619,5 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 function ttlFromExpiry(expiresAt?: number): number | undefined {
   if (expiresAt === undefined) return undefined;
   const remaining = expiresAt - Date.now();
-  return remaining > 0 ? remaining : undefined;
+  return remaining > 0 ? remaining : 1;
 }

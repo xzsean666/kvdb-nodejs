@@ -100,7 +100,11 @@ class SqliteDriver implements Driver {
     get: BetterSqlite3.Statement;
     upsert: BetterSqlite3.Statement;
     delete: BetterSqlite3.Statement;
+    getByPrefix: BetterSqlite3.Statement;
+    deleteByPrefix: BetterSqlite3.Statement;
   };
+  private writeAll?: (items: KVEntry[]) => void;
+  private deleteAll?: (items: string[]) => number;
 
   constructor(
     private readonly database: BetterSqlite3.Database,
@@ -137,6 +141,13 @@ class SqliteDriver implements Driver {
            "updated_at" = excluded."updated_at"`,
       ),
       delete: this.database.prepare(`DELETE FROM ${quoteIdent(table)} WHERE "key" = ?`),
+      getByPrefix: this.database.prepare(
+        `SELECT "key", "value" FROM ${quoteIdent(table)}
+         WHERE "key" LIKE ? ESCAPE '\\' AND ("expires_at" IS NULL OR "expires_at" > ?)`,
+      ),
+      deleteByPrefix: this.database.prepare(
+        `DELETE FROM ${quoteIdent(table)} WHERE "key" LIKE ? ESCAPE '\\'`,
+      ),
     };
   }
 
@@ -196,19 +207,23 @@ class SqliteDriver implements Driver {
   }
 
   setMany(entries: KVEntry[]): void {
-    const writeAll = this.database.transaction((items: KVEntry[]) => {
-      for (const entry of items) this.set(entry.key, entry.value, entry.ttlMs);
-    });
-    writeAll(entries);
+    if (!this.writeAll) {
+      this.writeAll = this.database.transaction((items: KVEntry[]) => {
+        for (const entry of items) this.set(entry.key, entry.value, entry.ttlMs);
+      });
+    }
+    this.writeAll(entries);
   }
 
   deleteMany(keys: string[]): number {
-    const deleteAll = this.database.transaction((items: string[]) => {
-      let count = 0;
-      for (const key of items) if (this.delete(key)) count++;
-      return count;
-    });
-    return deleteAll(keys);
+    if (!this.deleteAll) {
+      this.deleteAll = this.database.transaction((items: string[]) => {
+        let count = 0;
+        for (const key of items) if (this.delete(key)) count++;
+        return count;
+      });
+    }
+    return this.deleteAll(keys);
   }
 
   async *iterator(prefix?: string): AsyncGenerator<[string, RawEntry]> {
@@ -231,19 +246,15 @@ class SqliteDriver implements Driver {
   }
 
   getByPrefix(prefix: string): KVEntry[] {
-    const rows = this.database
-      .prepare(
-        `SELECT "key", "value" FROM ${quoteIdent(this.table)}
-         WHERE "key" LIKE ? ESCAPE '\\' AND ("expires_at" IS NULL OR "expires_at" > ?)`,
-      )
-      .all(`${escapeLike(prefix)}%`, Date.now()) as { key: string; value: string }[];
+    const rows = this.statements.getByPrefix.all(
+      `${escapeLike(prefix)}%`,
+      Date.now(),
+    ) as { key: string; value: string }[];
     return rows.map((row) => ({ key: row.key, value: row.value }));
   }
 
   deleteByPrefix(prefix: string): number {
-    return this.database
-      .prepare(`DELETE FROM ${quoteIdent(this.table)} WHERE "key" LIKE ? ESCAPE '\\'`)
-      .run(`${escapeLike(prefix)}%`).changes;
+    return this.statements.deleteByPrefix.run(`${escapeLike(prefix)}%`).changes;
   }
 
   find(where: QueryNode, options: FindOptions = {}, keyPrefix?: string): KVEntry[] {
@@ -419,6 +430,15 @@ class SqliteSchemaTable<Columns extends Record<string, unknown>>
     upsert: BetterSqlite3.Statement;
     getBy: Map<string, BetterSqlite3.Statement>;
   };
+  private writeAllRecords?: (
+    items: Array<{
+      key: string | number;
+      value: string;
+      columns: Record<string, unknown>;
+      ttlMs?: number;
+    }>,
+  ) => void;
+  private deleteAllRecords?: (keys: (string | number)[]) => number;
 
   constructor(
     private readonly database: BetterSqlite3.Database,
@@ -630,6 +650,37 @@ class SqliteSchemaTable<Columns extends Record<string, unknown>>
   delete(key: string | number): boolean {
     const pk = this.pkName;
     return this.statements.delete.run(key).changes > 0;
+  }
+
+  setRecords(
+    items: Array<{
+      key: string | number;
+      value: string;
+      columns: Record<string, unknown>;
+      ttlMs?: number;
+    }>,
+  ): void {
+    if (!this.writeAllRecords) {
+      this.writeAllRecords = this.database.transaction((batch: typeof items) => {
+        for (const item of batch) {
+          this.setRecord(item.key, item.value, item.columns, item.ttlMs);
+        }
+      });
+    }
+    this.writeAllRecords(items);
+  }
+
+  deleteRecords(keys: (string | number)[]): number {
+    if (!this.deleteAllRecords) {
+      this.deleteAllRecords = this.database.transaction((batch: typeof keys) => {
+        let count = 0;
+        for (const key of batch) {
+          if (this.delete(key)) count++;
+        }
+        return count;
+      });
+    }
+    return this.deleteAllRecords(keys);
   }
 
   clear(): void {
