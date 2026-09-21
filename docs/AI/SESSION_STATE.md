@@ -7,9 +7,9 @@
 
 ## 1. 核心状态概要
 
-- **当前 Goal**: 全面安全漏洞修复与极端性能瓶颈突破 (TASK-025-DEEP-AUDIT-HARDENING)
-- **当前 Task**: TASK-025-DEEP-AUDIT-HARDENING 全面安全加固与极致性能吞吐提升
-- **当前状态**: **DONE** (已完成代码实现、全量验证、文档与测试闭环)
+- **当前 Goal**: 队列系统设计与生产级扩展 (TASK-028-QUEUE)
+- **当前 Task**: 设计生产级可靠任务队列子系统架构与规格文档 (Step 1 & Step 2 完成)
+- **当前状态**: **DESIGN_AND_SPECS_READY** (已完成系统架构设计、规格定义与任务卡片)
 
 ---
 

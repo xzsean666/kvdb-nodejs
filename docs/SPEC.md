@@ -308,3 +308,163 @@ await tokens.find({
 });
 ```
 
+---
+
+## 16. 可靠任务队列系统 (Queue Subsystem)
+
+KVDB 内置专为生产环境设计的**可靠任务队列子系统 (Production-Grade Reliable Queue)**。基于已有的物理 Schema Table 引擎构建，零外部消息队列中间件依赖（无需 Redis、RabbitMQ 或 BullMQ），在保证极低运维负担的同时，提供严苛的金融级可靠性与高并发安全性。
+
+### 16.1 设计目标与生产级特性
+
+1. **至少交付一次保证 (At-Least-Once Delivery)**：任务在被消费处理期间不会从存储中删除；通过租约锁定机制（Visibility Timeout）确保工作节点崩溃后任务自动复活重试。
+2. **零并发争抢与防重复消费 (Atomic Lease & Split-Brain Prevention)**：
+   - 多 Worker / 跨进程抢占任务时，基于 `Table.update` 底层物理锁（SQLite 立即独占锁 / Postgres `FOR UPDATE SKIP LOCKED` / Mongo CAS 乐观锁）原子性争抢候选任务并派发独占 `lockToken`。
+   - 任何 `ack`、`nack`、`heartbeat` 必须匹配有效的 `lockToken`，杜绝因网络延迟导致的双重消费或脏提交。
+3. **退避重试与死信队列 (Exponential Backoff & Dead-Letter Queue)**：
+   - 支持固定延时（`fixed`）或指数退避（`exponential`）重试策略。
+   - 超过 `maxAttempts` 后自动进入 `failed` 死信状态，记录错误堆栈，支持后期告警与人工重放。
+4. **幂等去重 (Deduplication)**：支持通过业务唯一的 `dedupKey` 防止网络波动导致的重复入队。
+5. **优先级调度与延时执行 (Priority & Delayed Scheduling)**：支持按优先级（数字越大越优先）与计划执行时间戳（`available_at`）精准出队。
+6. **自动心跳守护 (Auto-Heartbeat)**：长耗时任务在 Worker 处理期间自动周期性续期可见性超时，防止未完成任务被误抢。
+
+### 16.2 队列模型与生命周期状态机
+
+#### 任务状态 (Job State)
+- `pending`: 就绪等待消费。
+- `active`: 已被 Worker 租约锁定正在处理。
+- `delayed`: 延时计划中或处于退避等待期。
+- `completed`: 成功完成。
+- `failed`: 超过最大重试次数，转入死信。
+
+#### 核心类型契约
+```ts
+export type JobState = "pending" | "active" | "delayed" | "completed" | "failed";
+
+export interface BackoffOptions {
+  type: "fixed" | "exponential";
+  delayMs: number;
+}
+
+export interface JobOptions {
+  priority?: number;            // 默认 0
+  delayMs?: number;             // 延迟毫秒
+  runAt?: Date | number;        // 指定执行时间戳
+  maxAttempts?: number;         // 最大尝试次数，默认 3
+  backoff?: BackoffOptions;     // 默认指数退避 1000ms
+  visibilityTimeoutMs?: number; // 默认 30_000ms
+  dedupKey?: string;            // 业务去重键
+}
+
+export interface Job<Payload = unknown, Result = unknown> {
+  readonly id: string;
+  readonly queue: string;
+  readonly payload: Payload;
+  readonly state: JobState;
+  readonly priority: number;
+  readonly attempts: number;
+  readonly maxAttempts: number;
+  readonly backoff: BackoffOptions;
+  readonly visibilityTimeoutMs: number;
+  readonly lockToken?: string;
+  readonly availableAt: number;
+  readonly createdAt: number;
+  readonly startedAt?: number;
+  readonly completedAt?: number;
+  readonly failedAt?: number;
+  readonly result?: Result;
+  readonly error?: string;
+}
+
+export interface QueueStats {
+  pending: number;
+  active: number;
+  delayed: number;
+  completed: number;
+  failed: number;
+  total: number;
+}
+```
+
+### 16.3 生产使用范式
+
+#### 1. 生产者入队 (Producer)
+```ts
+import { KVDB } from "kvdb-sdk";
+
+const db = new KVDB({ driver: "sqlite", url: "./app.db" });
+const queue = db.queue<{ email: string; template: string }>("mail_sender");
+
+// 立即入队
+const job = await queue.push({ email: "user@example.com", template: "welcome" });
+
+// 高优先级 + 延时入队 + 幂等去重
+await queue.push(
+  { email: "billing@example.com", template: "invoice" },
+  {
+    priority: 10,
+    delayMs: 60_000,
+    maxAttempts: 5,
+    backoff: { type: "exponential", delayMs: 2000 },
+    dedupKey: "invoice_order_1001",
+  }
+);
+
+// 批量入队
+await queue.pushMany([
+  { payload: { email: "a@test.com", template: "news" }, options: { priority: 1 } },
+  { payload: { email: "b@test.com", template: "news" }, options: { priority: 1 } },
+]);
+```
+
+#### 2. 消费者工作流 (Worker Runner)
+```ts
+// 启动生产级全托管 Worker
+const worker = queue.process(
+  async (job) => {
+    // 业务逻辑，返回值自动记入 job.result
+    return await sendEmail(job.payload.email, job.payload.template);
+  },
+  {
+    concurrency: 5,           // 并发工作槽位
+    pollIntervalMs: 500,      // 空闲轮询间隔
+    autoHeartbeat: true,      // 自动长任务心跳续期
+  }
+);
+
+// 优雅关闭 Worker (等待正在执行的任务处理完成)
+await worker.stop({ timeoutMs: 10_000 });
+```
+
+#### 3. 分布式手动拉取模式 (Manual Pull / ACK / NACK)
+```ts
+// 原子租约获取候选就绪任务
+const job = await queue.pop({ visibilityTimeoutMs: 60_000 });
+
+if (job) {
+  try {
+    const res = await doHeavyComputation(job.payload);
+    // 显式提交确认，写入结果
+    await queue.ack(job.id, job.lockToken!, res);
+  } catch (err: any) {
+    // 异常显式回退，进入退避重试或死信
+    await queue.nack(job.id, job.lockToken!, err.message);
+  }
+}
+```
+
+#### 4. 队列监控与治理
+```ts
+// 获取全状态统计指标
+const stats = await queue.getStats();
+console.log(stats); // { pending: 12, active: 3, delayed: 5, completed: 800, failed: 1, total: 821 }
+
+// 清理超过 7 天的历史已完成任务
+const cleaned = await queue.clean({
+  state: "completed",
+  olderThanMs: 7 * 24 * 3600_000,
+});
+
+// 重试死信队列任务
+await queue.retryFailed();
+```
+

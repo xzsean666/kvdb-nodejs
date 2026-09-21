@@ -78,6 +78,28 @@ class UserService {
 }
 ```
 
+## Reliable Job Queue (Production Ready)
+
+Zero external message broker dependency (no Redis or RabbitMQ required). Built on top of physical schema tables with atomic leases, visibility timeouts, exponential backoff retries, dead-letter queues, and concurrency control:
+
+```ts
+const emailQueue = db.queue<{ to: string; subject: string }>("emails");
+
+// Producer: enqueue with priority, delay, or deduplication
+await emailQueue.push(
+  { to: "alice@example.com", subject: "Welcome!" },
+  { priority: 10, maxAttempts: 5, backoff: { type: "exponential", delayMs: 1000 } }
+);
+
+// Consumer: managed worker runner with concurrency & auto-heartbeat
+const worker = emailQueue.process(async (job) => {
+  await sendEmail(job.payload.to, job.payload.subject);
+}, { concurrency: 4 });
+
+// Graceful shutdown
+await worker.stop();
+```
+
 ## Status
 
 SQLite is covered by unit tests and a real-database compliance suite. The

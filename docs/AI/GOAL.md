@@ -61,7 +61,7 @@
 - [ ] 缓存前缀清理能力（`Cache.deleteByPrefix`，让 `Table.clear()` 级联清空对应缓存）
 - [ ] SQL 后端对高级嵌套查询（如 `$elemMatch`）的原生/虚拟支持
 - [ ] 扩展后端支持：Redis 驱动适配器
-- [ ] 扩展后端支持：MySQL 驱动适配器
+- [ ] 生产级可靠任务队列子系统 (Queue Subsystem：原子租约、Visibility Timeout、指数退避重试、死信队列、全托管 Worker)
 - [ ] CI/CD 自动化流水线（Lint、Prettier、Matrix 驱动测试）
 
 ---

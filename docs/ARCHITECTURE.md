@@ -291,6 +291,44 @@ interface Plugin {
 }
 ```
 
+### 5.6 任务队列系统架构 (Queue Subsystem)
+
+Queue 是架构在物理 Schema Table 之上的生产级任务调度层。
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                       Queue Client                          │
+│        push() / pushMany() / pop() / ack() / nack()         │
+└──────────────────────────────┬──────────────────────────────┘
+                               │
+               ┌───────────────┴───────────────┐
+               ▼                               ▼
+┌──────────────────────────────┐ ┌──────────────────────────────┐
+│       Worker Runner          │ │       Visibility Reaper      │
+│  - Concurrency Slot Loop     │ │  - Active lease expiration   │
+│  - Backoff Retry Scheduler   │ │  - Auto recovery & failover  │
+│  - Auto-Heartbeat Extender   │ │  - Dead-Letter Transition    │
+└──────────────┬───────────────┘ └──────────────┬───────────────┘
+               │                                │
+               └───────────────┬────────────────┘
+                               ▼
+┌─────────────────────────────────────────────────────────────┐
+│                 Underlying Schema Table                     │
+│  - table: "_kvdb_queue_<queueName>"                         │
+│  - columns: [queue, state, priority, available_at, dedup]   │
+│  - composite B-Tree index: [queue, state, available_at]     │
+│  - Table.update() atomic row locking (SQLite / PG / Mongo)  │
+└─────────────────────────────────────────────────────────────┘
+```
+
+#### 关键技术实现
+1. **物理存储映射**：每个队列实例对应物理表 `_kvdb_queue_<name>`，利用 `primaryKey: { name: "id" }`，二级检索物理列 `state`、`priority`、`available_at`、`dedup_key` 以及复合 B-Tree 索引 `[state, available_at, priority]`。
+2. **原子租约（Atomic Pop & Lock）**：通过复合索引极速索引扫描就绪任务候选 ID，并通过 `Table.update` 物理排他锁原子验证并变更为 `active`，发放 `lockToken`。
+3. **状态机与重试管道**：
+   - 消费成功：`ack(id, token)` -> `state: "completed"`。
+   - 消费抛错：`nack(id, token, err)` -> 若 `attempts < maxAttempts` 计算退避毫秒，更新 `available_at = now + delayMs`，置为 `delayed`；若超限，转入 `failed` 死信。
+   - 进程异常崩溃：可见性超时机制（Visibility Timeout）保证其他 Worker 在 `available_at` 超期后自动接管。
+
 ---
 
 ## 6. 性能策略(映射到模块)

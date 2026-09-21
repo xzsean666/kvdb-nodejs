@@ -38,6 +38,7 @@
 | **TASK-025-CACHE** | Cache 前缀清理能力 (deleteByPrefix) | M3 | **TODO** | TASK-004 | `src/cache/*` |
 | **TASK-026** | PostgreSQL 与 MongoDB 真实 Docker 环境合规验证 | M3 | **TODO** | TASK-008, 021 | `test/compliance/*` |
 | **TASK-027** | Redis 与 MySQL 驱动扩展 | M3 | **TODO** | TASK-007 | `src/drivers/*` |
+| **TASK-028-QUEUE** | 生产级可靠任务队列子系统 (Queue Subsystem) | M3 | **TODO** | TASK-020 | `src/queue/*`, `src/core/kvdb.ts` |
 
 ---
 
