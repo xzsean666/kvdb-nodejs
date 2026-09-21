@@ -109,12 +109,19 @@ export class Table<Value = JsonValue, Columns extends Record<string, unknown> = 
       return;
     }
     const strKey = String(key);
-    const before = await this.deps.hooks.run("beforeWrite", {
-      namespace: this.namespace,
-      key: strKey,
-      value: value as JsonValue,
-      ttlMs: options.ttlMs,
-    });
+    const before = this.deps.hooks.has("beforeWrite")
+      ? await this.deps.hooks.run("beforeWrite", {
+          namespace: this.namespace,
+          key: strKey,
+          value: value as JsonValue,
+          ttlMs: options.ttlMs,
+        })
+      : {
+          namespace: this.namespace,
+          key: strKey,
+          value: value as JsonValue,
+          ttlMs: options.ttlMs,
+        };
 
     const schema = await this.schemaDriver();
     const cKey = this.cacheKey(strKey, Boolean(schema));
@@ -123,14 +130,18 @@ export class Table<Value = JsonValue, Columns extends Record<string, unknown> = 
       const columns = validateColumnValues(schema.schema, rawKeys);
       await schema.setRecord(key, serialize(before.value), columns, before.ttlMs);
       if (this.deps.cache) await this.deps.cache.set(cKey, before.value, before.ttlMs);
-      await this.deps.hooks.run("afterWrite", before);
+      if (this.deps.hooks.has("afterWrite")) {
+        await this.deps.hooks.run("afterWrite", before);
+      }
       return;
     }
 
     const driver = await this.deps.getDriver();
     await driver.set(cKey, serialize(before.value), before.ttlMs);
     if (this.deps.cache) await this.deps.cache.set(cKey, before.value, before.ttlMs);
-    await this.deps.hooks.run("afterWrite", before);
+    if (this.deps.hooks.has("afterWrite")) {
+      await this.deps.hooks.run("afterWrite", before);
+    }
   }
 
   /**
@@ -190,12 +201,14 @@ export class Table<Value = JsonValue, Columns extends Record<string, unknown> = 
       }
 
       if (this.deps.cache) await this.deps.cache.set(cKey, written, writtenTtl);
-      await this.deps.hooks.run("afterWrite", {
-        namespace: this.namespace,
-        key: strKey,
-        value: written as JsonValue,
-        ttlMs: writtenTtl,
-      });
+      if (this.deps.hooks.has("afterWrite")) {
+        await this.deps.hooks.run("afterWrite", {
+          namespace: this.namespace,
+          key: strKey,
+          value: written as JsonValue,
+          ttlMs: writtenTtl,
+        });
+      }
       return written;
     }
 
@@ -224,18 +237,22 @@ export class Table<Value = JsonValue, Columns extends Record<string, unknown> = 
     }
 
     if (this.deps.cache) await this.deps.cache.set(cKey, written, writtenTtl);
-    await this.deps.hooks.run("afterWrite", {
-      namespace: this.namespace,
-      key: strKey,
-      value: written as JsonValue,
-      ttlMs: writtenTtl,
-    });
+    if (this.deps.hooks.has("afterWrite")) {
+      await this.deps.hooks.run("afterWrite", {
+        namespace: this.namespace,
+        key: strKey,
+        value: written as JsonValue,
+        ttlMs: writtenTtl,
+      });
+    }
     return written;
   }
 
   async get(key: string | number): Promise<Value | undefined> {
     const strKey = String(key);
-    await this.deps.hooks.run("beforeRead", { namespace: this.namespace, key: strKey, value: undefined });
+    if (this.deps.hooks.has("beforeRead")) {
+      await this.deps.hooks.run("beforeRead", { namespace: this.namespace, key: strKey, value: undefined });
+    }
 
     const schema = await this.schemaDriver();
     const cKey = this.cacheKey(strKey, Boolean(schema));
@@ -264,13 +281,17 @@ export class Table<Value = JsonValue, Columns extends Record<string, unknown> = 
       }
     }
 
-    const after = await this.deps.hooks.run("afterRead", {
-      namespace: this.namespace,
-      key: strKey,
-      value: value as JsonValue | undefined,
-    });
-    return after.value as Value | undefined;
+    if (this.deps.hooks.has("afterRead")) {
+      const after = await this.deps.hooks.run("afterRead", {
+        namespace: this.namespace,
+        key: strKey,
+        value: value as JsonValue | undefined,
+      });
+      return after.value as Value | undefined;
+    }
+    return value;
   }
+
 
   async delete(key: string | number): Promise<boolean> {
     const strKey = String(key);
@@ -459,24 +480,40 @@ export class Table<Value = JsonValue, Columns extends Record<string, unknown> = 
     }
 
     const driver = await this.deps.getDriver();
-    const parsed = await this.deps.hooks.run("beforeQuery", {
-      namespace: this.namespace,
-      where: parseWhere(query.where),
-      options: parseFindOptions(query),
-    });
+    const whereParsed = parseWhere(query.where);
+    const findOpts = parseFindOptions(query);
+    const parsed = this.deps.hooks.has("beforeQuery")
+      ? await this.deps.hooks.run("beforeQuery", {
+          namespace: this.namespace,
+          where: whereParsed,
+          options: findOpts,
+        })
+      : {
+          namespace: this.namespace,
+          where: whereParsed,
+          options: findOpts,
+        };
     const entries = await driver.find(
       parsed.where,
       parsed.options,
       namespacePrefix(this.deps.scope),
     );
-    await this.deps.hooks.run("afterQuery", parsed);
+    if (this.deps.hooks.has("afterQuery")) {
+      await this.deps.hooks.run("afterQuery", parsed);
+    }
 
     if (this.deps.autoIndex) {
       const paths = collectFieldPaths(parsed.where, parsed.options?.sort);
       const scopedPaths = paths.map((path) => `${this.namespace}::${path}`);
-      for (const scopedPath of this.deps.autoIndex.record(scopedPaths)) {
-        const path = scopedPath.slice(this.namespace.length + 2);
-        await driver.ensureIndex(path);
+      const toIndex = this.deps.autoIndex.record(scopedPaths);
+      if (toIndex.length > 0) {
+        void Promise.all(
+          toIndex.map((scopedPath) => {
+            const path = scopedPath.slice(this.namespace.length + 2);
+            return Promise.resolve(driver.ensureIndex(path)).catch(() => {});
+          }),
+        );
+
       }
     }
     return entries.map((entry) => ({
@@ -484,6 +521,7 @@ export class Table<Value = JsonValue, Columns extends Record<string, unknown> = 
       value: deserialize<Value>(entry.value),
     }));
   }
+
 
   async findRecords(query: FindQuery = {}): Promise<PhysicalRecord<Columns, Value>[]> {
     const schema = await this.schemaDriver();
@@ -608,7 +646,12 @@ function applyPatch<Value>(current: Value, patch: UpdatePatch<Value>): Value {
         "objects; use the function form `(current) => next` for other shapes",
     );
   }
-  return { ...current, ...patch } as Value;
+  const safePatch: Record<string, unknown> = {};
+  for (const k of Object.keys(patch as Record<string, unknown>)) {
+    if (k === "__proto__" || k === "constructor" || k === "prototype") continue;
+    safePatch[k] = (patch as Record<string, unknown>)[k];
+  }
+  return { ...current, ...safePatch } as Value;
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {

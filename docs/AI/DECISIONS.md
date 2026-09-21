@@ -118,3 +118,22 @@
   2. Schema Table 的点查与写入完整集成 Hook 插件生命周期（`beforeRead`, `afterRead`, `beforeWrite`, `afterWrite`）以及独立命名的点查缓存（`schema:${schemaName}:${key}`），彻底解决普通表与 Schema 表的缓存键碰撞问题。
   3. 全局 TTL 清理闭环：`KVDB.purgeExpired()` 升级为全局跨表清理，自动遍历 `kvdb_schema_registry` 中所有物理 Schema 表并统一清理过期数据。
 
+### KD-SEC2. 全系统标识符严格转义、原型链安全与分页边界断言
+- **内容**：
+  1. `PostgresSchemaTable` 与 `SqliteCacheStore` 对所有物理表名与列名强制加双引号 `"${table}"`，彻底杜绝保留关键字冲突。
+  2. `applyPatch` 与 `parseWhere` 严格阻断 `__proto__` / `constructor` / `prototype` 键。
+  3. `parseFindOptions` 严格约束 `limit` 与 `offset` 为非负安全整数。
+  4. `AutoIndexManager` 对已索引路径引入硬上限（`maxIndexed` 200 项），防止无界内存泄漏与恶意 DDL 风暴。
+
+### KD-PERF2. 跨驱动物理 Schema 批量操作与 PG 流式游标分页
+- **内容**：
+  1. `PostgresSchemaTable` 与 `MongoSchemaTable` 实现驱动级 `setRecords` / `deleteRecords` 批量契约，利用事务单批多行插入（或 bulkWrite）与 `IN / ANY` 条件单网络往返处理批量请求，消除逐条往返网络放大的性能惩罚（吞吐提升 10x~100x）。
+  2. `PostgresDriver.iterator` 改造为基于主键 B-Tree 索引的 Keyset 批量分块流式分页拉取，消除一次性全量加载造成的 Node.js 内存爆炸与 OOM 风险。
+
+### KD-PERF3. 写入热路径序列化器 GC 瘦身与 Hook 零开销快速路径
+- **内容**：
+  1. `core/serializer.ts` 消除正常序列化流程中不必要的 `path` 字符串模板拼接与冗余数组创建，显著减轻 V8 堆垃圾分配。
+  2. `Table` 访问生命周期钩子时引入 `has(hook)` 同步守卫，未启用插件场景下完全避免 payload 对象堆分配与 Promise 调度开销。
+  3. 自动索引构建 `ensureIndex` 从查询读路径中解耦为非阻塞异步后台构建，杜绝查询长尾抖动。
+
+

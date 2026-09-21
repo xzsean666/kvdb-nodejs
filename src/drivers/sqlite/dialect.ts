@@ -11,7 +11,10 @@ import type { FieldPath } from "../../query/ast.js";
 import type { JsonValue } from "../../types/json.js";
 
 export class SqliteDialect implements SqlDialect {
-  constructor(private readonly column: string = "value") {}
+  private readonly column: string;
+  constructor(column: string = "value") {
+    this.column = column === "value" ? "value" : quoteIdentifier(column);
+  }
 
   scalarAt(path: FieldPath): string {
     if (path.sourceKind === "column") {

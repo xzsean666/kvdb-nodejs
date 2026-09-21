@@ -25,15 +25,16 @@ describe("PostgreSQL Multi-Key Driver (TASK-018)", () => {
         }
 
         // Simulate SELECT * FROM table WHERE
-        if (sql.includes("SELECT * FROM kvdb_schema_")) {
+        if (sql.includes("SELECT * FROM kvdb_schema_") || sql.includes('SELECT * FROM "kvdb_schema_')) {
           const rows = mockRows.data ?? [];
           return { rows, rowCount: rows.length, command: "SELECT", oid: 0, fields: [] };
         }
 
         // Simulate DELETE
-        if (sql.includes("DELETE FROM kvdb_schema_")) {
+        if (sql.includes("DELETE FROM kvdb_schema_") || sql.includes('DELETE FROM "kvdb_schema_')) {
           return { rows: [], rowCount: 1, command: "DELETE", oid: 0, fields: [] };
         }
+
 
         return { rows: [], rowCount: 0, command: "OK", oid: 0, fields: [] };
       }),
@@ -62,7 +63,9 @@ describe("PostgreSQL Multi-Key Driver (TASK-018)", () => {
     expect(table).toBeDefined();
 
     // Check table creation query
-    const createTableQuery = executedQueries.find((q) => q.sql.includes("CREATE TABLE IF NOT EXISTS kvdb_schema_blocks_"));
+    const createTableQuery = executedQueries.find(
+      (q) => q.sql.includes("CREATE TABLE IF NOT EXISTS") && q.sql.includes("kvdb_schema_blocks_"),
+    );
     expect(createTableQuery).toBeDefined();
     expect(createTableQuery!.sql).toContain('"blockNumber" BIGINT PRIMARY KEY');
     expect(createTableQuery!.sql).toContain('"hash" TEXT');
@@ -92,8 +95,11 @@ describe("PostgreSQL Multi-Key Driver (TASK-018)", () => {
 
     await table.setRecord(1001, JSON.stringify({ miner: "0xabc" }), { hash: "0xhash1", gas: 50000 });
 
-    const insertQuery = executedQueries.find((q) => q.sql.includes("INSERT INTO kvdb_schema_blocks_"));
+    const insertQuery = executedQueries.find(
+      (q) => q.sql.includes("INSERT INTO") && q.sql.includes("kvdb_schema_blocks_"),
+    );
     expect(insertQuery).toBeDefined();
+
     expect(insertQuery!.sql).toContain('ON CONFLICT ("blockNumber") DO UPDATE SET');
     expect(insertQuery!.params).toEqual([
       1001,

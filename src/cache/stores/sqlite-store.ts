@@ -33,6 +33,8 @@ export class SqliteCacheStore implements KVStore {
     upsert: BetterSqlite3.Statement;
     delete: BetterSqlite3.Statement;
   };
+  private writeAll?: (items: KVEntry[]) => void;
+  private deleteAll?: (items: string[]) => number;
 
   constructor(options: SqliteStoreOptions = {}) {
     const table = options.table ?? "kvdb_cache";
@@ -56,20 +58,21 @@ export class SqliteCacheStore implements KVStore {
     this.database.pragma("case_sensitive_like = ON");
     if (file !== ":memory:") this.database.pragma("journal_mode = WAL");
     this.database.exec(`
-      CREATE TABLE IF NOT EXISTS ${table} (
+      CREATE TABLE IF NOT EXISTS "${table}" (
         key        TEXT PRIMARY KEY,
         value      TEXT NOT NULL,
         expires_at INTEGER
       );
+      CREATE INDEX IF NOT EXISTS "${table}_expires_at" ON "${table}" (expires_at);
     `);
 
     this.statements = {
-      get: this.database.prepare(`SELECT value, expires_at FROM ${table} WHERE key = ?`),
+      get: this.database.prepare(`SELECT value, expires_at FROM "${table}" WHERE key = ?`),
       upsert: this.database.prepare(
-        `INSERT INTO ${table} (key, value, expires_at) VALUES (@key, @value, @expiresAt)
+        `INSERT INTO "${table}" (key, value, expires_at) VALUES (@key, @value, @expiresAt)
          ON CONFLICT(key) DO UPDATE SET value = excluded.value, expires_at = excluded.expires_at`,
       ),
-      delete: this.database.prepare(`DELETE FROM ${table} WHERE key = ?`),
+      delete: this.database.prepare(`DELETE FROM "${table}" WHERE key = ?`),
     };
   }
 
@@ -102,7 +105,7 @@ export class SqliteCacheStore implements KVStore {
   }
 
   clear(): void {
-    this.database.exec(`DELETE FROM ${this.table}`);
+    this.database.exec(`DELETE FROM "${this.table}"`);
   }
 
   getMany(keys: string[]): (RawEntry | undefined)[] {
@@ -110,19 +113,23 @@ export class SqliteCacheStore implements KVStore {
   }
 
   setMany(entries: KVEntry[]): void {
-    const writeAll = this.database.transaction((items: KVEntry[]) => {
-      for (const entry of items) this.set(entry.key, entry.value, entry.ttlMs);
-    });
-    writeAll(entries);
+    if (!this.writeAll) {
+      this.writeAll = this.database.transaction((items: KVEntry[]) => {
+        for (const entry of items) this.set(entry.key, entry.value, entry.ttlMs);
+      });
+    }
+    this.writeAll(entries);
   }
 
   deleteMany(keys: string[]): number {
-    const deleteAll = this.database.transaction((items: string[]) => {
-      let count = 0;
-      for (const key of items) if (this.delete(key)) count++;
-      return count;
-    });
-    return deleteAll(keys);
+    if (!this.deleteAll) {
+      this.deleteAll = this.database.transaction((items: string[]) => {
+        let count = 0;
+        for (const key of items) if (this.delete(key)) count++;
+        return count;
+      });
+    }
+    return this.deleteAll(keys);
   }
 
   async *iterator(prefix?: string): AsyncGenerator<[string, RawEntry]> {
@@ -133,7 +140,7 @@ export class SqliteCacheStore implements KVStore {
         : `key LIKE ? ESCAPE '\\' AND (expires_at IS NULL OR expires_at > ?)`;
     const params = prefix === undefined ? [now] : [`${escapeLike(prefix)}%`, now];
     const statement = this.database.prepare(
-      `SELECT key, value, expires_at FROM ${this.table} WHERE ${where}`,
+      `SELECT key, value, expires_at FROM "${this.table}" WHERE ${where}`,
     );
     for (const row of statement.iterate(...params) as Iterable<{
       key: string;
@@ -143,6 +150,7 @@ export class SqliteCacheStore implements KVStore {
       yield [row.key, { value: row.value, expiresAt: row.expires_at ?? undefined }];
     }
   }
+
 
   close(): void {
     this.database.close();

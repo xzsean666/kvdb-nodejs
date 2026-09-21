@@ -62,6 +62,11 @@ export function parseWhere(where: Record<string, unknown> | undefined): QueryNod
   if (where === undefined || Object.keys(where).length === 0) {
     return { kind: "true" };
   }
+  for (const key of Object.keys(where)) {
+    if (key === "__proto__" || key === "constructor" || key === "prototype") {
+      throw new KvdbQueryError(`Invalid query key "${key}": prototype pollution prevention`);
+    }
+  }
   const children = Object.entries(where).map(([key, value]) => parseEntry(key, value));
   return children.length === 1 ? children[0]! : { kind: "and", children };
 }
@@ -94,7 +99,11 @@ export function parseSchemaWhere(
 function parseSchemaWhereNode(where: Record<string, unknown>, knownCols: Set<string>): QueryNode {
   const parts: QueryNode[] = [];
   for (const [key, value] of Object.entries(where)) {
+    if (key === "__proto__" || key === "constructor" || key === "prototype") {
+      throw new KvdbQueryError(`Invalid query key "${key}": prototype pollution prevention`);
+    }
     switch (key) {
+
       case "$and":
         parts.push({ kind: "and", children: parseSchemaBranchList(key, value, knownCols) });
         break;
@@ -285,10 +294,21 @@ export function parseFindOptions(
   },
   knownSchema?: TableSchema | MultiKeySchema | Set<string>,
 ): FindOptions {
+  if (query.limit !== undefined) {
+    if (typeof query.limit !== "number" || !Number.isSafeInteger(query.limit) || query.limit < 0) {
+      throw new KvdbQueryError(`Invalid query limit: expected non-negative safe integer, got ${query.limit}`);
+    }
+  }
+  if (query.offset !== undefined) {
+    if (typeof query.offset !== "number" || !Number.isSafeInteger(query.offset) || query.offset < 0) {
+      throw new KvdbQueryError(`Invalid query offset: expected non-negative safe integer, got ${query.offset}`);
+    }
+  }
   return {
     limit: query.limit,
     offset: query.offset,
     sort: parseSort(query.sort, knownSchema),
   };
 }
+
 

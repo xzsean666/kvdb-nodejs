@@ -12,6 +12,7 @@ export class AutoIndexManager {
   constructor(
     private readonly threshold: number,
     private readonly maxTracked: number = 10_000,
+    private readonly maxIndexed: number = 200,
   ) {}
 
   /**
@@ -22,6 +23,7 @@ export class AutoIndexManager {
     const toIndex: string[] = [];
     for (const path of paths) {
       if (this.indexed.has(path)) continue;
+      if (this.indexed.size >= this.maxIndexed) continue;
       const next = (this.counts.get(path) ?? 0) + 1;
       this.counts.set(path, next);
       if (next >= this.threshold) {
@@ -30,6 +32,7 @@ export class AutoIndexManager {
         toIndex.push(path);
       }
     }
+
 
     if (this.counts.size > this.maxTracked) {
       const excess = this.counts.size - this.maxTracked;

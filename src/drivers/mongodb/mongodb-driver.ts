@@ -432,6 +432,47 @@ class MongoSchemaTable<Columns extends Record<string, unknown>> implements Schem
     );
   }
 
+  async setRecords(
+    items: Array<{
+      key: string | number;
+      value: string;
+      columns: Record<string, unknown>;
+      ttlMs?: number;
+    }>,
+  ): Promise<void> {
+    if (items.length === 0) return;
+    const pk = this.pkName;
+    const now = Date.now();
+    const operations = items.map((item) => {
+      const docToSet: Record<string, unknown> = {
+        _id: item.key,
+        value: item.value,
+        doc: deserialize(item.value),
+        expiresAt: expiresAtFromTtl(item.ttlMs, now) ?? null,
+        updatedAt: now,
+      };
+      if (pk !== "_id") {
+        docToSet[pk] = item.key;
+      }
+      for (const [name, def] of Object.entries(this.secondaryKeys)) {
+        const val = item.columns[name];
+        docToSet[name] = val === undefined ? (def.default !== undefined ? def.default : null) : val;
+      }
+      return {
+        updateOne: {
+          filter: { _id: item.key as any },
+          update: {
+            $set: docToSet,
+            $setOnInsert: { createdAt: now },
+          },
+          upsert: true,
+        },
+      };
+    });
+    await this.collection.bulkWrite(operations as any);
+  }
+
+
   async getRecord(key: string | number): Promise<{ key: string | number; value: string; columns: Record<string, unknown>; expiresAt?: number } | undefined> {
     const doc = await this.collection.findOne({ _id: key as any });
     if (!doc) return undefined;
@@ -565,6 +606,13 @@ class MongoSchemaTable<Columns extends Record<string, unknown>> implements Schem
   async delete(key: string | number): Promise<boolean> {
     return (await this.collection.deleteOne({ _id: key as any })).deletedCount > 0;
   }
+
+  async deleteRecords(keys: (string | number)[]): Promise<number> {
+    if (keys.length === 0) return 0;
+    const result = await this.collection.deleteMany({ _id: { $in: keys as any } });
+    return result.deletedCount;
+  }
+
 
   async clear(): Promise<void> {
     await this.collection.deleteMany({});

@@ -244,21 +244,46 @@ export class PostgresDriver implements Driver {
   }
 
   async *iterator(prefix?: string): AsyncGenerator<[string, RawEntry]> {
+    const CHUNK_SIZE = 500;
+    let lastKey: string | undefined = undefined;
     const now = Date.now();
-    const where =
-      prefix === undefined
-        ? `"expires_at" IS NULL OR "expires_at" > $1`
-        : `"key" LIKE $1 AND ("expires_at" IS NULL OR "expires_at" > $2)`;
-    const params = prefix === undefined ? [now] : [`${escapeLike(prefix)}%`, now];
-    const result = await this.pool.query<{ key: string; value: string; expires_at: string | null }>(
-      `SELECT "key", "value", "expires_at" FROM "${this.table}" WHERE ${where}`,
-      params,
-    );
-    for (const row of result.rows) {
-      yield [
-        row.key,
-        { value: row.value, expiresAt: row.expires_at === null ? undefined : Number(row.expires_at) },
-      ];
+
+    while (true) {
+      const params: unknown[] = [now];
+      const clauses: string[] = ['("expires_at" IS NULL OR "expires_at" > $1)'];
+
+      if (prefix !== undefined) {
+        params.push(`${escapeLike(prefix)}%`);
+        clauses.push(`"key" LIKE $${params.length}`);
+      }
+
+      if (lastKey !== undefined) {
+        params.push(lastKey);
+        clauses.push(`"key" > $${params.length}`);
+      }
+
+      params.push(CHUNK_SIZE);
+      const sql = `SELECT "key", "value", "expires_at" FROM "${this.table}"
+        WHERE ${clauses.join(" AND ")}
+        ORDER BY "key" ASC
+        LIMIT $${params.length}`;
+
+      const result = await this.pool.query<{ key: string; value: string; expires_at: string | null }>(
+        sql,
+        params,
+      );
+
+      if (result.rows.length === 0) break;
+
+      for (const row of result.rows) {
+        yield [
+          row.key,
+          { value: row.value, expiresAt: row.expires_at === null ? undefined : Number(row.expires_at) },
+        ];
+        lastKey = row.key;
+      }
+
+      if (result.rows.length < CHUNK_SIZE) break;
     }
   }
 
@@ -376,7 +401,7 @@ export class PostgresDriver implements Driver {
         .map(([column, definition]) => `"${column}" ${pgType(definition.type)}${definition.nullable === false ? " NOT NULL" : ""}${definition.default !== undefined ? ` DEFAULT ${pgDefault(definition.default)}` : ""}`)
         .join(",\n");
       await this.pool.query(`
-        CREATE TABLE IF NOT EXISTS ${physical} (
+        CREATE TABLE IF NOT EXISTS "${physical}" (
           ${pkSql},
           ${definitions}${definitions ? "," : ""}
           "value" TEXT NOT NULL,
@@ -385,7 +410,7 @@ export class PostgresDriver implements Driver {
           "updated_at" BIGINT NOT NULL
         )
       `);
-      await this.pool.query(`CREATE INDEX IF NOT EXISTS "${physical}_expires_at" ON ${physical} ("expires_at")`);
+      await this.pool.query(`CREATE INDEX IF NOT EXISTS "${physical}_expires_at" ON "${physical}" ("expires_at")`);
       await this.pool.query(
         "INSERT INTO kvdb_schema_registry (logical_name, schema_json) VALUES ($1, $2) ON CONFLICT (logical_name) DO NOTHING",
         [name, JSON.stringify(resolved)],
@@ -394,15 +419,16 @@ export class PostgresDriver implements Driver {
         if (definition.index) {
           const idxOpts = typeof definition.index === "object" ? definition.index : {};
           const idxName = idxOpts.name ?? `${physical}_${column}_idx`;
-          await this.pool.query(`CREATE ${idxOpts.unique ? "UNIQUE " : ""}INDEX IF NOT EXISTS "${idxName}" ON ${physical} ("${column}")`);
+          await this.pool.query(`CREATE ${idxOpts.unique ? "UNIQUE " : ""}INDEX IF NOT EXISTS "${idxName}" ON "${physical}" ("${column}")`);
         }
       }
       for (const index of norm.indexes) {
         const idxName = index.name ?? `${physical}_${index.keys.join("_")}_idx`;
         await this.pool.query(
-          `CREATE ${index.unique ? "UNIQUE " : ""}INDEX IF NOT EXISTS "${idxName}" ON ${physical} (${index.keys.map((c) => `"${c}"`).join(", ")})`,
+          `CREATE ${index.unique ? "UNIQUE " : ""}INDEX IF NOT EXISTS "${idxName}" ON "${physical}" (${index.keys.map((c) => `"${c}"`).join(", ")})`,
         );
       }
+
     }
     return new PostgresSchemaTable(this.pool, physical, name, resolved);
   }
@@ -465,17 +491,88 @@ class PostgresSchemaTable<Columns extends Record<string, unknown>> implements Sc
       .map((field) => `"${field}" = EXCLUDED."${field}"`)
       .join(", ");
 
-    const sql = `INSERT INTO ${this.table} (${fields.map((f) => `"${f}"`).join(", ")})
+    const sql = `INSERT INTO "${this.table}" (${fields.map((f) => `"${f}"`).join(", ")})
       VALUES (${placeholders})
       ON CONFLICT ("${pk}") DO UPDATE SET ${updateClauses}`;
 
     await this.pool.query(sql, params);
   }
 
+  async setRecords(
+    items: Array<{
+      key: string | number;
+      value: string;
+      columns: Record<string, unknown>;
+      ttlMs?: number;
+    }>,
+  ): Promise<void> {
+    if (items.length === 0) return;
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const pk = this.pkName;
+      const names = Object.keys(this.secondaryKeys);
+      const fields = [pk, ...names, "value", "expires_at", "created_at", "updated_at"];
+      const updateClauses = [...names, "value", "expires_at", "updated_at"]
+        .map((field) => `"${field}" = EXCLUDED."${field}"`)
+        .join(", ");
+      const now = Date.now();
+
+      const CHUNK_SIZE = 200;
+      for (let i = 0; i < items.length; i += CHUNK_SIZE) {
+        const chunk = items.slice(i, i + CHUNK_SIZE);
+        const params: unknown[] = [];
+        const valueTuples: string[] = [];
+
+        for (const item of chunk) {
+          const tuplePlaceholders: string[] = [];
+          params.push(item.key);
+          tuplePlaceholders.push(`$${params.length}`);
+
+          for (const name of names) {
+            const val = item.columns[name];
+            const def = this.secondaryKeys[name]!;
+            if (val === undefined) {
+              params.push(def.default !== undefined ? def.default : null);
+            } else if (def.type === "json") {
+              params.push(JSON.stringify(val));
+            } else {
+              params.push(val);
+            }
+            tuplePlaceholders.push(`$${params.length}`);
+          }
+
+          params.push(item.value);
+          tuplePlaceholders.push(`$${params.length}`);
+          params.push(expiresAtFromTtl(item.ttlMs, now) ?? null);
+          tuplePlaceholders.push(`$${params.length}`);
+          params.push(now);
+          tuplePlaceholders.push(`$${params.length}`);
+          params.push(now);
+          tuplePlaceholders.push(`$${params.length}`);
+
+          valueTuples.push(`(${tuplePlaceholders.join(", ")})`);
+        }
+
+        const sql = `INSERT INTO "${this.table}" (${fields.map((f) => `"${f}"`).join(", ")})
+          VALUES ${valueTuples.join(",\n")}
+          ON CONFLICT ("${pk}") DO UPDATE SET ${updateClauses}`;
+
+        await client.query(sql, params);
+      }
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
   async getRecord(key: string | number): Promise<{ key: string | number; value: string; columns: Record<string, unknown>; expiresAt?: number } | undefined> {
     const pk = this.pkName;
     const result = await this.pool.query<Record<string, unknown>>(
-      `SELECT * FROM ${this.table} WHERE "${pk}" = $1`,
+      `SELECT * FROM "${this.table}" WHERE "${pk}" = $1`,
       [key],
     );
     const row = result.rows[0];
@@ -510,7 +607,7 @@ class PostgresSchemaTable<Columns extends Record<string, unknown>> implements Sc
       : keyValue;
 
     const result = await this.pool.query<Record<string, unknown>>(
-      `SELECT * FROM ${this.table} WHERE "${keyName}" = $1`,
+      `SELECT * FROM "${this.table}" WHERE "${keyName}" = $1`,
       [param],
     );
     const row = result.rows[0];
@@ -539,7 +636,7 @@ class PostgresSchemaTable<Columns extends Record<string, unknown>> implements Sc
       await client.query("BEGIN");
       const pk = this.pkName;
       const result = await client.query<Record<string, unknown>>(
-        `SELECT * FROM ${this.table} WHERE "${pk}" = $1 FOR UPDATE`,
+        `SELECT * FROM "${this.table}" WHERE "${pk}" = $1 FOR UPDATE`,
         [key],
       );
       const row = result.rows[0];
@@ -548,7 +645,7 @@ class PostgresSchemaTable<Columns extends Record<string, unknown>> implements Sc
       if (row) {
         const expiry = row.expires_at === null ? null : Number(row.expires_at);
         if (expiry !== null && expiry <= now) {
-          await client.query(`DELETE FROM ${this.table} WHERE "${pk}" = $1`, [key]);
+          await client.query(`DELETE FROM "${this.table}" WHERE "${pk}" = $1`, [key]);
         } else {
           current = {
             key: this.parsePk(row[pk]),
@@ -585,7 +682,7 @@ class PostgresSchemaTable<Columns extends Record<string, unknown>> implements Sc
         .join(", ");
 
       await client.query(
-        `INSERT INTO ${this.table} (${fields.map((f) => `"${f}"`).join(", ")})
+        `INSERT INTO "${this.table}" (${fields.map((f) => `"${f}"`).join(", ")})
          VALUES (${placeholders})
          ON CONFLICT ("${pk}") DO UPDATE SET ${updateClauses}`,
         params,
@@ -602,14 +699,24 @@ class PostgresSchemaTable<Columns extends Record<string, unknown>> implements Sc
   async delete(key: string | number): Promise<boolean> {
     const pk = this.pkName;
     const result = await this.pool.query(
-      `DELETE FROM ${this.table} WHERE "${pk}" = $1`,
+      `DELETE FROM "${this.table}" WHERE "${pk}" = $1`,
       [key],
     );
     return (result.rowCount ?? 0) > 0;
   }
 
+  async deleteRecords(keys: (string | number)[]): Promise<number> {
+    if (keys.length === 0) return 0;
+    const pk = this.pkName;
+    const result = await this.pool.query(
+      `DELETE FROM "${this.table}" WHERE "${pk}" = ANY($1)`,
+      [keys],
+    );
+    return result.rowCount ?? 0;
+  }
+
   async clear(): Promise<void> {
-    await this.pool.query(`DELETE FROM ${this.table}`);
+    await this.pool.query(`DELETE FROM "${this.table}"`);
   }
 
   async find(where: QueryNode, options: FindOptions = {}): Promise<Array<{ key: string | number; value: string; columns: Record<string, unknown> }>> {
@@ -619,7 +726,7 @@ class PostgresSchemaTable<Columns extends Record<string, unknown>> implements Sc
     const params: unknown[] = [...compiled.params];
     const nowIdx = params.push(Date.now());
 
-    let sql = `SELECT * FROM ${this.table} WHERE ("expires_at" IS NULL OR "expires_at" > $${nowIdx}) AND (${compiled.sql})`;
+    let sql = `SELECT * FROM "${this.table}" WHERE ("expires_at" IS NULL OR "expires_at" > $${nowIdx}) AND (${compiled.sql})`;
     if (options.sort && options.sort.length > 0) {
       sql += ` ORDER BY ${compileOrderBy(options.sort, dialect)}`;
     }
@@ -640,12 +747,12 @@ class PostgresSchemaTable<Columns extends Record<string, unknown>> implements Sc
     if (schemasEqual(this.schema, evolved)) return;
 
     const colSql = `"${name}" ${pgType(definition.type)}${definition.nullable === false ? " NOT NULL" : ""}${definition.default !== undefined ? ` DEFAULT ${pgDefault(definition.default)}` : ""}`;
-    await this.pool.query(`ALTER TABLE ${this.table} ADD COLUMN IF NOT EXISTS ${colSql}`);
+    await this.pool.query(`ALTER TABLE "${this.table}" ADD COLUMN IF NOT EXISTS ${colSql}`);
 
     if (definition.index) {
       const idxOpts = typeof definition.index === "object" ? definition.index : {};
       const idxName = idxOpts.name ?? `${this.table}_${name}_idx`;
-      await this.pool.query(`CREATE ${idxOpts.unique ? "UNIQUE " : ""}INDEX IF NOT EXISTS "${idxName}" ON ${this.table} ("${name}")`);
+      await this.pool.query(`CREATE ${idxOpts.unique ? "UNIQUE " : ""}INDEX IF NOT EXISTS "${idxName}" ON "${this.table}" ("${name}")`);
     }
 
     this.schema = evolved as unknown as TableSchema<Columns>;
@@ -662,7 +769,7 @@ class PostgresSchemaTable<Columns extends Record<string, unknown>> implements Sc
     const cols = definition.keys ?? definition.columns ?? [];
     const idxName = definition.name ?? `${this.table}_${cols.join("_")}_idx`;
     await this.pool.query(
-      `CREATE ${definition.unique ? "UNIQUE " : ""}INDEX IF NOT EXISTS "${idxName}" ON ${this.table} (${cols.map((c) => `"${c}"`).join(", ")})`,
+      `CREATE ${definition.unique ? "UNIQUE " : ""}INDEX IF NOT EXISTS "${idxName}" ON "${this.table}" (${cols.map((c) => `"${c}"`).join(", ")})`,
     );
 
     this.schema = evolved as unknown as TableSchema<Columns>;
@@ -671,6 +778,7 @@ class PostgresSchemaTable<Columns extends Record<string, unknown>> implements Sc
       [JSON.stringify(this.schema), this.logicalName],
     );
   }
+
 
   private parsePk(val: unknown): string | number {
     const pkType = this.schema.primaryKey?.type ?? "string";

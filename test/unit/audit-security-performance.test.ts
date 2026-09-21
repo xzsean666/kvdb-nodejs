@@ -2,7 +2,7 @@ import { describe, it, expect, vi } from "vitest";
 import { KVDB } from "../../src/core/kvdb.js";
 import { Cache } from "../../src/cache/cache.js";
 import { AutoIndexManager } from "../../src/core/auto-index.js";
-import { parsePath, parseColumnField } from "../../src/query/parser.js";
+import { parsePath, parseColumnField, parseWhere, parseFindOptions } from "../../src/query/parser.js";
 import {
   validateTableSchema,
   evolveSchemaAddKey,
@@ -12,6 +12,11 @@ import {
   KvdbSchemaError,
 } from "../../src/core/errors.js";
 import type { Plugin } from "../../src/plugins/types.js";
+import { SqliteCacheStore } from "../../src/cache/stores/sqlite-store.js";
+import { PostgresDriver } from "../../src/drivers/postgres/postgres-driver.js";
+import { MongoDriver } from "../../src/drivers/mongodb/mongodb-driver.js";
+import type { Pool, QueryResult } from "pg";
+import type { Db, Collection, MongoClient } from "mongodb";
 
 describe("Comprehensive Audit: Security, Performance & Soundness", () => {
   describe("1. Security: SQL Keyword Columns & ANSI Quoting", () => {
@@ -453,4 +458,262 @@ describe("Comprehensive Audit: Security, Performance & Soundness", () => {
       await db.close();
     });
   });
+
+  describe("13. Security: Prototype Pollution Prevention in table.update & parseWhere", () => {
+    it("strips __proto__, constructor, and prototype from table.update patch objects", async () => {
+      const db = new KVDB({ driver: "sqlite", url: ":memory:" });
+      const users = db.table<{ name: string; age: number }>("users");
+
+      await users.set("alice", { name: "Alice", age: 30 });
+
+      // Craft malicious patch with dangerous properties
+      const maliciousPatch = JSON.parse(
+        '{"name": "Alice Cooper", "__proto__": {"polluted": true}, "constructor": {"evil": true}, "prototype": {"hacked": true}}'
+      );
+
+      const updated = await users.update("alice", maliciousPatch);
+      expect(updated.name).toBe("Alice Cooper");
+      expect(updated.age).toBe(30);
+
+      // Verify Object.prototype is not polluted
+      expect((Object.prototype as any).polluted).toBeUndefined();
+      expect((Object.prototype as any).evil).toBeUndefined();
+      expect((Object.prototype as any).hacked).toBeUndefined();
+      expect((updated as any).polluted).toBeUndefined();
+      expect((updated as any).evil).toBeUndefined();
+      expect((updated as any).hacked).toBeUndefined();
+
+      // Read back from DB and verify clean record
+      const stored = await users.get("alice");
+      expect(stored?.name).toBe("Alice Cooper");
+      expect((stored as any)?.polluted).toBeUndefined();
+      expect((stored as any)?.evil).toBeUndefined();
+      expect((stored as any)?.hacked).toBeUndefined();
+
+      await db.close();
+    });
+
+    it("rejects prototype pollution keys in parseWhere", () => {
+      expect(() => {
+        parseWhere(JSON.parse('{"__proto__": "attack"}'));
+      }).toThrow(KvdbQueryError);
+
+      expect(() => {
+        parseWhere({ constructor: "attack" } as any);
+      }).toThrow(KvdbQueryError);
+
+      expect(() => {
+        parseWhere({ prototype: "attack" } as any);
+      }).toThrow(KvdbQueryError);
+    });
+  });
+
+  describe("14. Security: Pagination Limit and Offset Soundness", () => {
+    it("rejects negative or non-integer limit and offset in parseFindOptions", () => {
+      expect(() => {
+        parseFindOptions({ limit: -1 });
+      }).toThrow(KvdbQueryError);
+
+      expect(() => {
+        parseFindOptions({ limit: 1.5 });
+      }).toThrow(KvdbQueryError);
+
+      expect(() => {
+        parseFindOptions({ limit: NaN });
+      }).toThrow(KvdbQueryError);
+
+      expect(() => {
+        parseFindOptions({ offset: -10 });
+      }).toThrow(KvdbQueryError);
+
+      expect(() => {
+        parseFindOptions({ offset: Infinity });
+      }).toThrow(KvdbQueryError);
+    });
+
+    it("accepts valid non-negative integer limit and offset", () => {
+      const opts = parseFindOptions({ limit: 50, offset: 100 });
+      expect(opts.limit).toBe(50);
+      expect(opts.offset).toBe(100);
+    });
+  });
+
+  describe("15. Security: AutoIndexManager maxIndexed Bound", () => {
+    it("respects maxIndexed limit to prevent unbounded memory growth and DDL storms", () => {
+      // AutoIndexManager(threshold, maxTracked, maxIndexed)
+      const manager = new AutoIndexManager(2, 100, 3);
+
+      // First query records paths
+      const first = manager.record(["p1", "p2", "p3", "p4"]);
+      expect(first).toEqual([]);
+
+      // Second query reaches threshold 2 for all 4 paths, but maxIndexed is 3
+      const second = manager.record(["p1", "p2", "p3", "p4"]);
+      expect(second).toEqual(["p1", "p2", "p3"]);
+
+      // Subsequent query on p4 should still be ignored because maxIndexed (3) was reached
+      const third = manager.record(["p4"]);
+      expect(third).toEqual([]);
+    });
+  });
+
+  describe("16. Performance: SqliteCacheStore Identifier Quoting & Prepared Transactions", () => {
+    it("handles SQL keyword table names and properly executes setMany and deleteMany", () => {
+      const store = new SqliteCacheStore({
+        file: ":memory:",
+        table: "order", // SQL reserved keyword
+      });
+
+      const entries = [
+        { key: "k1", value: "v1", ttlMs: 60000 },
+        { key: "k2", value: "v2", ttlMs: 60000 },
+        { key: "k3", value: "v3", ttlMs: 60000 },
+      ];
+
+      store.setMany(entries);
+
+      expect(store.get("k1")?.value).toBe("v1");
+      expect(store.get("k2")?.value).toBe("v2");
+      expect(store.get("k3")?.value).toBe("v3");
+
+      // Verify deleteMany with cached transaction
+      const deleted = store.deleteMany(["k1", "k3"]);
+      expect(deleted).toBe(2);
+      expect(store.get("k1")).toBeUndefined();
+      expect(store.get("k2")?.value).toBe("v2");
+      expect(store.get("k3")).toBeUndefined();
+
+      store.close();
+    });
+  });
+
+  describe("17. Performance: Table Hook Zero-Cost Fast-Path", () => {
+    it("executes CRUD without hook execution overhead when no plugins are registered", async () => {
+      const db = new KVDB({ driver: "sqlite", url: ":memory:" });
+      const table = db.table("test");
+
+      // Spy on hook runtime has()
+      const hasSpy = vi.spyOn((table as any).deps.hooks, "has");
+
+      await table.set("key1", { count: 1 });
+      const val = await table.get("key1");
+      expect(val).toEqual({ count: 1 });
+
+      await table.update("key1", { count: 2 });
+      await table.delete("key1");
+
+      // has() was checked
+      expect(hasSpy).toHaveBeenCalled();
+      // Since no plugins registered, has() returned false
+      expect((table as any).deps.hooks.has("beforeWrite")).toBe(false);
+
+      await db.close();
+    });
+  });
+
+  describe("18. Performance: PostgreSQL & MongoDB Schema Table Batch Operations", () => {
+    it("PostgresSchemaTable.setRecords and deleteRecords execute batch SQL operations", async () => {
+      const executedQueries: Array<{ sql: string; params?: unknown[] }> = [];
+      const mockClient = {
+        query: vi.fn(async (sql: string, params?: unknown[]): Promise<QueryResult> => {
+          executedQueries.push({ sql: sql.trim(), params });
+          if (sql.includes("SELECT schema_json FROM kvdb_schema_registry")) {
+            return { rows: [], rowCount: 0, command: "SELECT", oid: 0, fields: [] };
+          }
+          if (sql.includes("DELETE FROM") || sql.includes("INSERT INTO")) {
+            return { rows: [], rowCount: params?.length ?? 1, command: "OK", oid: 0, fields: [] };
+          }
+          return { rows: [], rowCount: 0, command: "OK", oid: 0, fields: [] };
+        }),
+        release: vi.fn(),
+      };
+      const mockPool = {
+        query: mockClient.query,
+        connect: vi.fn(async () => mockClient),
+        end: vi.fn(async () => {}),
+      } as unknown as Pool;
+
+      const driver = new PostgresDriver(mockPool, "kvdb_kv");
+      const schema = {
+        primaryKey: { name: "id", type: "string" as const },
+        keys: {
+          tag: { type: "string" as const },
+        },
+      };
+      const schemaTable = await driver.openSchemaTable!("items", schema);
+
+      const records = [
+        { key: "item-1", value: JSON.stringify({ name: "First" }), columns: { tag: "alpha" } },
+        { key: "item-2", value: JSON.stringify({ name: "Second" }), columns: { tag: "beta" } },
+      ];
+
+      await schemaTable!.setRecords!(records);
+
+      // Verify batch insert was executed with single SQL and multi-row placeholders
+      const insertQuery = executedQueries.find((q) => q.sql.includes('INSERT INTO "kvdb_schema_items_'));
+      expect(insertQuery).toBeDefined();
+      expect(insertQuery?.sql).toContain("ON CONFLICT");
+      expect(insertQuery?.sql).toContain("DO UPDATE SET");
+      // 2 records * 6 parameters per record (id, tag, value, expires_at, created_at, updated_at)
+      expect(insertQuery?.params).toHaveLength(12);
+
+      // Verify batch delete was executed with single ANY($1) SQL
+      await schemaTable!.deleteRecords!(["item-1", "item-2"]);
+      const deleteQuery = executedQueries.find((q) => q.sql.includes('DELETE FROM "kvdb_schema_items_'));
+      expect(deleteQuery).toBeDefined();
+      expect(deleteQuery?.sql).toContain('WHERE "id" = ANY($1)');
+      expect(deleteQuery?.params).toEqual([["item-1", "item-2"]]);
+    });
+
+    it("MongoSchemaTable.setRecords and deleteRecords execute bulkWrite and deleteMany", async () => {
+      const mockItemsCollection = {
+        bulkWrite: vi.fn(async (_ops: any[]) => ({ ok: 1 })),
+        deleteMany: vi.fn(async (_filter: any) => ({ deletedCount: 2 })),
+        createIndex: vi.fn(async () => "ok"),
+      };
+      const mockRegistryCollection = {
+        findOne: vi.fn(async () => null),
+        updateOne: vi.fn(async () => ({ matchedCount: 1 })),
+        createIndex: vi.fn(async () => "ok"),
+      };
+
+      const mockDb = {
+        collection: vi.fn((name: string) => {
+          if (name === "kvdb_schema_registry") return mockRegistryCollection;
+          return mockItemsCollection;
+        }),
+      } as unknown as Db;
+
+      const mockClient = {
+        close: vi.fn(async () => {}),
+      } as unknown as MongoClient;
+
+      const driver = new MongoDriver(mockClient, mockDb, mockItemsCollection as any);
+      const schema = {
+        primaryKey: { name: "id", type: "string" as const },
+        keys: {
+          tag: { type: "string" as const },
+        },
+      };
+      const schemaTable = await driver.openSchemaTable!("items", schema);
+
+      const records = [
+        { key: "item-1", value: JSON.stringify({ name: "First" }), columns: { tag: "alpha" } },
+        { key: "item-2", value: JSON.stringify({ name: "Second" }), columns: { tag: "beta" } },
+      ];
+
+      await schemaTable!.setRecords!(records);
+      expect(mockItemsCollection.bulkWrite).toHaveBeenCalledTimes(1);
+      const ops = mockItemsCollection.bulkWrite.mock.calls[0]![0];
+      expect(ops).toHaveLength(2);
+      expect(ops[0].updateOne.filter).toEqual({ _id: "item-1" });
+      expect(ops[0].updateOne.upsert).toBe(true);
+
+      await schemaTable!.deleteRecords!(["item-1", "item-2"]);
+      expect(mockItemsCollection.deleteMany).toHaveBeenCalledWith({
+        _id: { $in: ["item-1", "item-2"] },
+      });
+    });
+  });
 });
+

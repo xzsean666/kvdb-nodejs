@@ -103,6 +103,7 @@ class SqliteDriver implements Driver {
     getByPrefix: BetterSqlite3.Statement;
     deleteByPrefix: BetterSqlite3.Statement;
   };
+  private readonly queryStatements = new Map<string, BetterSqlite3.Statement>();
   private writeAll?: (items: KVEntry[]) => void;
   private deleteAll?: (items: string[]) => number;
 
@@ -279,11 +280,22 @@ class SqliteDriver implements Driver {
       params.push(options.offset);
     }
 
-    const rows = this.database.prepare(sql).all(...params) as { key: string; value: string }[];
+    let stmt = this.queryStatements.get(sql);
+    if (!stmt) {
+      if (this.queryStatements.size >= 128) {
+        const oldest = this.queryStatements.keys().next().value;
+        if (oldest !== undefined) this.queryStatements.delete(oldest);
+      }
+      stmt = this.database.prepare(sql);
+      this.queryStatements.set(sql, stmt);
+    }
+
+    const rows = stmt.all(...params) as { key: string; value: string }[];
     return rows.map((row) => ({ key: row.key, value: row.value }));
   }
 
   ensureIndex(jsonPath: string): void {
+    this.queryStatements.clear();
     const path = parsePath(jsonPath);
     const expression = this.dialect.scalarAt(path);
     const safe = jsonPath.replace(/[^A-Za-z0-9]/g, "_");
@@ -292,6 +304,7 @@ class SqliteDriver implements Driver {
       `CREATE INDEX IF NOT EXISTS ${quoteIdent(indexName)} ON ${quoteIdent(this.table)} (${expression})`,
     );
   }
+
 
   openSchemaTable<Columns extends Record<string, unknown>>(
     name: string,
@@ -439,6 +452,8 @@ class SqliteSchemaTable<Columns extends Record<string, unknown>>
     }>,
   ) => void;
   private deleteAllRecords?: (keys: (string | number)[]) => number;
+  private readonly queryStatements = new Map<string, BetterSqlite3.Statement>();
+
 
   constructor(
     private readonly database: BetterSqlite3.Database,
@@ -707,7 +722,18 @@ class SqliteSchemaTable<Columns extends Record<string, unknown>>
       sql += options.limit === undefined ? " LIMIT -1 OFFSET ?" : " OFFSET ?";
       params.push(options.offset);
     }
-    const rows = this.database.prepare(sql).all(...params) as Record<string, unknown>[];
+
+    let stmt = this.queryStatements.get(sql);
+    if (!stmt) {
+      if (this.queryStatements.size >= 128) {
+        const oldest = this.queryStatements.keys().next().value;
+        if (oldest !== undefined) this.queryStatements.delete(oldest);
+      }
+      stmt = this.database.prepare(sql);
+      this.queryStatements.set(sql, stmt);
+    }
+
+    const rows = stmt.all(...params) as Record<string, unknown>[];
     const pk = this.pkName;
     return rows.map((row) => {
       const columns: Record<string, unknown> = {};
@@ -734,6 +760,7 @@ class SqliteSchemaTable<Columns extends Record<string, unknown>>
     const evolved = evolveSchemaAddKey(this.schema, name, definition);
     if (schemasEqual(this.schema, evolved)) return;
 
+    this.queryStatements.clear();
     const colSql = `${quoteIdent(name)} ${sqliteType(definition.type)}${
       definition.nullable === false ? " NOT NULL" : ""
     }${definition.default !== undefined ? ` DEFAULT ${sqlDefault(definition.default)}` : ""}`;
@@ -760,6 +787,7 @@ class SqliteSchemaTable<Columns extends Record<string, unknown>>
     const evolved = evolveSchemaAddIndex(this.schema, definition);
     if (schemasEqual(this.schema, evolved)) return;
 
+    this.queryStatements.clear();
     const cols = definition.keys ?? definition.columns ?? [];
     const idxName = definition.name ?? `${this.table}_${cols.join("_")}_idx`;
     this.database.exec(
@@ -773,6 +801,7 @@ class SqliteSchemaTable<Columns extends Record<string, unknown>>
       .prepare("UPDATE kvdb_schema_registry SET schema_json = ? WHERE logical_name = ?")
       .run(JSON.stringify(this.schema), this.logicalName);
   }
+
 }
 
 function validateQueryColumns(node: QueryNode, schema: TableSchema): void {

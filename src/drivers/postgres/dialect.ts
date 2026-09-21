@@ -19,7 +19,10 @@ import type { FieldPath } from "../../query/ast.js";
 import type { JsonValue } from "../../types/json.js";
 
 export class PostgresDialect implements SqlDialect {
-  constructor(private readonly column: string = "value") {}
+  private readonly column: string;
+  constructor(column: string = "value") {
+    this.column = column === "value" ? "value" : quoteIdentifier(column);
+  }
 
   scalarAt(path: FieldPath, valueHint?: JsonValue): string {
     if (path.sourceKind === "column") {
