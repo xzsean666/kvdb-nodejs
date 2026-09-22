@@ -1,6 +1,6 @@
 {
   "name": "kvdb-sdk",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "High-performance, multi-driver, extensible KV Database SDK for Node.js — unified data interface, JSON query, and an independent cache system.",
   "type": "module",
   "license": "MIT",
