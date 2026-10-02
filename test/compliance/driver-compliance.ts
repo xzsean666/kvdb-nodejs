@@ -39,7 +39,7 @@ export function describeDriverCompliance(label: string, makeDriver: MakeDriver):
     describe("capabilities", () => {
       it("declares a coherent capability set", () => {
         expect(typeof driver.capabilities.nativeTtl).toBe("boolean");
-        expect(["sqlite-json", "pg-jsonb", "mongo", "none"]).toContain(
+        expect(["sqlite-json", "pg-jsonb", "mongo", "mysql-json", "none"]).toContain(
           driver.capabilities.jsonQuery,
         );
         expect(driver.provider).toBe(label);

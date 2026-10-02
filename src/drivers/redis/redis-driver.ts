@@ -48,6 +48,13 @@ export interface RedisDriverOptions {
   client?: Redis;
   /** Optional key prefix for all keys managed by this driver instance. */
   keyPrefix?: string;
+  /** Optional ioredis options (connectTimeout, retryStrategy, maxRetriesPerRequest, etc.). */
+  redisOptions?: Record<string, unknown>;
+  /**
+   * If true, allows clear() to execute FLUSHDB when keyPrefix is empty.
+   * Default: false (protects shared Redis instances from accidental total wipe).
+   */
+  allowFlushDbWithoutPrefix?: boolean;
 }
 
 let ioredisConstructor: any;
@@ -86,12 +93,18 @@ export class RedisDriverFactory implements DriverFactory {
       const instance = new RedisClass(this.options.url ?? "redis://127.0.0.1:6379", {
         lazyConnect: true,
         maxRetriesPerRequest: 3,
+        ...this.options.redisOptions,
       }) as Redis;
       await instance.connect();
       client = instance;
       ownsClient = true;
     }
-    return new RedisDriver(client, this.options.keyPrefix ?? "", ownsClient);
+    return new RedisDriver(
+      client,
+      this.options.keyPrefix ?? "",
+      ownsClient,
+      this.options.allowFlushDbWithoutPrefix ?? false,
+    );
   }
 }
 
@@ -109,6 +122,7 @@ export class RedisDriver implements Driver {
     private readonly client: Redis,
     private readonly prefix: string,
     private readonly ownsClient: boolean = false,
+    private readonly allowFlushDbWithoutPrefix: boolean = false,
   ) {}
 
   private fullKey(key: string): string {
@@ -158,7 +172,7 @@ export class RedisDriver implements Driver {
   }
 
   async clear(): Promise<void> {
-    if (!this.prefix) {
+    if (!this.prefix && this.allowFlushDbWithoutPrefix) {
       await this.client.flushdb();
     } else {
       await this.deleteByPrefix("");

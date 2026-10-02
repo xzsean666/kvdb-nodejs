@@ -11,20 +11,31 @@
 import type { JsonValue } from "../types/json.js";
 import { KvdbSerializationError } from "./errors.js";
 
+const MAX_SERIALIZE_DEPTH = 64;
+const DANGEROUS_PROTO_KEYS = new Set(["__proto__", "constructor", "prototype"]);
+
+function secureReviver(key: string, value: unknown): unknown {
+  if (DANGEROUS_PROTO_KEYS.has(key)) {
+    return undefined;
+  }
+  return value;
+}
+
 /**
  * Serialize a value to canonical JSON text.
  * - Object keys are sorted (deterministic output).
  * - `undefined` object properties are dropped (JSON semantics).
  * - Cycles, functions, symbols, and non-finite numbers throw.
+ * - Max nesting depth is guarded against stack overflows.
  */
 export function serialize(value: unknown): string {
   return canonicalize(value, new WeakSet(), []);
 }
 
-/** Parse canonical JSON text back into a value. */
+/** Parse canonical JSON text back into a value with prototype pollution protection. */
 export function deserialize<T = JsonValue>(text: string): T {
   try {
-    return JSON.parse(text) as T;
+    return JSON.parse(text, secureReviver) as T;
   } catch (cause) {
     throw new KvdbSerializationError("Failed to parse stored JSON", { cause });
   }
@@ -53,6 +64,9 @@ function canonicalize(
   seen: WeakSet<object>,
   pathStack: (string | number)[],
 ): string {
+  if (pathStack.length > MAX_SERIALIZE_DEPTH) {
+    throw new KvdbSerializationError(`Maximum JSON depth of ${MAX_SERIALIZE_DEPTH} exceeded at ${formatPath(pathStack)}`);
+  }
   if (value === null) return "null";
 
   const valueType = typeof value;
@@ -110,6 +124,7 @@ function canonicalize(
     let first = true;
     for (let i = 0; i < keys.length; i++) {
       const k = keys[i]!;
+      if (DANGEROUS_PROTO_KEYS.has(k)) continue;
       const propertyValue = (object as Record<string, unknown>)[k];
       if (propertyValue !== undefined) {
         pathStack.push(k);

@@ -64,6 +64,8 @@ export interface PostgresDriverOptions {
    * key-prefix indexes exist, so writes pay no JSON-index cost unless you opt in.
    */
   indexes?: string[];
+  /** Optional node-postgres Pool configuration options (max, idleTimeoutMillis, ssl, etc.). */
+  poolOptions?: Record<string, unknown>;
 }
 
 const IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/;
@@ -89,7 +91,7 @@ export class PostgresDriverFactory implements DriverFactory {
         { cause },
       );
     }
-    const pool = new PoolCtor({ connectionString: this.options.url });
+    const pool = new PoolCtor({ connectionString: this.options.url, ...this.options.poolOptions });
     const table = this.options.table ?? "kvdb_kv";
     await pool.query(`
       CREATE TABLE IF NOT EXISTS "${table}" (

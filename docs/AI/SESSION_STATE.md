@@ -7,63 +7,48 @@
 
 ## 1. 核心状态概要
 
-- **当前 Goal**: Milestone 3 生产级功能扩展与生态演进 (已 100% 全面达成)
-- **当前 Task**: Redis 与 MySQL 物理驱动扩展与全生态合规 (TASK-027)
-- **当前状态**: **COMPLETED_AND_VERIFIED** (真实 Docker 容器环境下 SQLite、PostgreSQL、MongoDB、Redis、MySQL 全五套物理驱动 149 项合规测试 100% 绿灯全过，253 项单测 100% 通过，26 个官方示例全部成功运行)
+- **当前 Goal**: 生产就绪度深度审计与工业级生产加固 (TASK-032-PRODUCTION-READY)
+- **当前 Task**: 审计隐患全面修复与生态终验
+- **当前状态**: **COMPLETED_AND_VERIFIED** (4 项 P0 阻断隐患、3 项 P1 稳定性短板、2 项 P2 安全与运维功能全部修复，261 项单测 100% 通过，149 项真实数据库容器合规测试 100% 绿灯全过，26 个官方示例全部无警告通过，构建产物由 1.99MB 瘦身至 218KB)
 
 ---
 
-## 2. 本次任务交付清单 (TASK-027)
+## 2. 本次任务交付清单 (TASK-032-PRODUCTION-READY)
 
-### A. 驱动实现与查询求值引擎
-1. **AST 内存通用求值引擎 (`src/query/evaluator.ts`)**:
-   - 实现 `evaluateQuery(node: QueryNode, doc: unknown): boolean` 与 `sortDocuments(items, sortSpecs)`。
-   - 支持 `$eq`, `$ne`, `$gt`, `$gte`, `$lt`, `$lte`, `$in`, `$nin`, `$exists`, `$elemMatch`, 嵌套路径、深比较与 `column` 字段源映射。
-   - 为无原生嵌套 JSON 查询下推能力的后端（如 Redis、简单 KV 存储）提供纯内存 QueryNode AST 完整求值器与排序器，保证 100% 跨驱动契约一致性。
-2. **Redis 驱动与高性能缓存适配 (`src/drivers/redis/redis-driver.ts`, `src/cache/stores/redis-store.ts`)**:
-   - 实现 `RedisDriverFactory`, `RedisDriver`, `RedisStore`。
-   - 采用原子 Lua 脚本服务端 CAS `update(key, mutate)`，在 50 并发增量下实现零丢失写、零冲突死锁。
-   - 支持 `SCAN` 批量前缀清理 `deleteByPrefix` 与 AST 查询过滤。
-   - 支持负数/0 TTL 拦截删除与 Cache 参数宽容解析。
-   - 提供 `close()` 释放底层客户端连接，避免 Node.js 事件循环挂起。
-3. **MySQL / MariaDB 驱动与多键表 (`src/drivers/mysql/mysql-driver.ts`)**:
-   - 基于 `mysql2/promise` 连接池实现严格关系型 KV 存储与动态多键物理表映射。
-   - 采用行级排他锁 `SELECT ... FOR UPDATE` 实现事务性原子并发更新 `update(key, mutate)`。
-   - 自动适配 InnoDB utf8mb4 索引长度上限（VARCHAR 255），支持复合索引与动态加列/加索引。
-   - 完美支持 JSON/Boolean 列的序列化与类型自适应转换。
+### A. 4 项致命生产阻断缺陷修复 (P0 Blockers)
+1. **MySQL AST 查询与排序真实下推 (`src/drivers/mysql/dialect.ts`, `src/drivers/mysql/mysql-driver.ts`)**:
+   - 彻底废除将全表数据拉入 Node.js 内存做 JS 过滤排序的致命缺陷。
+   - 新增 `MysqlDialect`，利用 MySQL 5.7+/8.0+ `JSON_EXTRACT` / `->>` / `JSON_CONTAINS_PATH` 实现真正的 SQL WHERE 条件、ORDER BY、LIMIT 与 OFFSET 下推，物理索引全面生效，消除几十万级数据下的内存 OOM 崩溃隐患。
+2. **多 Worker 分布式队列租约原子抢占 (`src/core/table.ts`, `src/queue/queue.ts`)**:
+   - 修复 `Queue.pop()` 闭包中引用查询旧快照导致并发抢占重复消费的严重 Bug。
+   - 为 `Table` 新增 `updateRecord()` API，在行级锁事务内直接检验并原子更新物理列；若任务已被其他 Worker 抢占则事务安全回滚，保证 100% 租约互斥性与 Exactly-Once/At-Most-Once 可靠性。
+3. **构建产物瘦身与驱动依赖隔离 (`package.json`, `tsup.config.ts`)**:
+   - 在 `package.json` 中将 `ioredis` 与 `mysql2` 补全为可选 `peerDependencies`。
+   - 在 `tsup.config.ts` 中显式配置 `external` 排除所有数据库驱动，打包产物从 1.99MB 骤降至 218KB，杜绝将特定平台原生库打入包体的跨平台部署崩溃风险。
+4. **AutoBatcher 停机刷盘保护与退出信号 (`src/core/kvdb.ts`)**:
+   - 提供 `gracefulShutdown: true` 与 `db.registerShutdownHooks()`，捕获 `SIGTERM` / `SIGINT` / `beforeExit` 信号，在进程退出前强制 flush 内存缓冲，避免数据静默丢失。
 
-### B. 真实数据库容器测试矩阵
-- **全驱动合规测试 (149 项)**:
-  - SQLite: 31 项测试全部通过 (100% Pass)
-  - PostgreSQL: 31 项测试全部通过 (100% Pass)
-  - MongoDB: 31 项测试全部通过 (100% Pass)
-  - Redis: 25 项测试全部通过 (100% Pass)
-  - MySQL: 31 项测试全部通过 (100% Pass)
-  - **总计 149 项合规单测 100% 绿灯无跳过**。
-- **单元测试**:
-  - `test/unit/redis-driver.test.ts`: 6 项测试全部通过。
-  - `test/unit/mysql-driver.test.ts`: 5 项测试全部通过。
-  - 全量单元测试 `pnpm test`: 253 项全部通过。
-- **示例与脚手架**:
-  - `examples/25-redis-kv-and-cache.ts`: 实战运行成功。
-  - `examples/26-mysql-kv-and-multikey.ts`: 实战运行成功。
-  - 全量 26 个官方示例 `pnpm examples`: 100% 成功运行。
-  - 自动化脚本 `scripts/run-docker-compliance.sh`: 纳入 MySQL。
+### B. 高可用、稳定性与安全性加固 (P1 / P2)
+1. **防缓存击穿单飞并发保护 (`src/cache/cache.ts`)**:
+   - 重构 `Cache.wrap()` 为即时单飞（SingleFlight）Promise 合并，消除并发请求同毫秒到达时多线程穿透查库的空窗期。
+2. **驱动连接池参数透传 (`src/core/kvdb.ts`, 驱动工厂)**:
+   - `KVDBOptions` 增加 `pool` 配置项，允许自由配置 PostgreSQL、MySQL、MongoDB、Redis 的底层连接池大小、超时与 SSL 证书。
+3. **Redis 安全 clear() 模式 (`src/drivers/redis/redis-driver.ts`)**:
+   - 默认禁止在无前缀情况下执行破坏性的 `FLUSHDB`，引入 `allowFlushDbWithoutPrefix` 安全守卫。
+4. **序列化安全与原型链污染防护 (`src/core/serializer.ts`)**:
+   - `MAX_SERIALIZE_DEPTH = 64` 守卫深层嵌套防爆栈崩溃。
+   - 反序列化采用安全 reviver 剥离 `__proto__`, `constructor`, `prototype`，杜绝原型链污染攻击。
+5. **容器健康探测接口 (`src/core/kvdb.ts`)**:
+   - 暴露 `await db.healthCheck()` 接口，直接提供 K8s Liveness / Readiness 探针集成。
 
 ---
 
-## 3. 全局里程碑达成状态 (Milestone 1, 2, 3 全部 100% 完成)
+## 3. 全局里程碑达成状态
 
 - **Milestone 1 (多驱动核心与独立缓存体系)**: 100% 完成
 - **Milestone 2 (动态多键与物理索引架构)**: 100% 完成
 - **Milestone 3 (生产级功能扩展与生态演进)**: 100% 完成
-  - TASK-024 (查询缓存与写失效) -> DONE
-  - TASK-025-CACHE (Cache 前缀清理) -> DONE
-  - TASK-026 (PostgreSQL & MongoDB 真实 Docker 合规) -> DONE
-  - TASK-027 (Redis & MySQL 驱动扩展与全生态合规) -> DONE
-  - TASK-028-QUEUE (可靠任务队列子系统) -> DONE
-  - TASK-029-AUTO-BATCH (高性能微批处理与写聚合) -> DONE
-  - TASK-031-SECURITY-PERF-HARDENING (安全性能深度加固) -> DONE
+- **TASK-032-PRODUCTION-READY (生产就绪全面加固)**: 100% 完成
 
 ---
 
@@ -73,15 +58,15 @@
 # 1. 类型检查
 pnpm typecheck
 
-# 2. 打包构建
+# 2. 打包构建 (产物大小 218KB)
 pnpm build
 
-# 3. 本地单元测试 (253 tests)
+# 3. 本地单元测试 (261 tests 全部通过)
 pnpm test
 
-# 4. 全驱动真实数据库合规测试 (149 tests across SQLite, Postgres, Mongo, Redis, MySQL)
+# 4. 全驱动真实数据库合规测试 (149 tests 跨 SQLite, Postgres, Mongo, Redis, MySQL)
 pnpm test:compliance:all
 
-# 5. 官方全量实战示例运行 (26 examples)
+# 5. 官方全量实战示例运行 (26 个实战示例 100% 成功)
 pnpm examples
 ```

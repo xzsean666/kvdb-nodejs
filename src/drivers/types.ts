@@ -79,7 +79,7 @@ export interface DriverCapabilities {
   /** Backend expires keys itself (e.g. Mongo TTL index) vs SDK wraps expiry. */
   nativeTtl: boolean;
   /** Which JSON-query dialect the backend's visitor targets. */
-  jsonQuery: "sqlite-json" | "pg-jsonb" | "mongo" | "none";
+  jsonQuery: "sqlite-json" | "pg-jsonb" | "mongo" | "mysql-json" | "none";
   /** Backend manages its own connection pool (MongoDB) — core must not pool it. */
   managesOwnPool: boolean;
   supportsTransactions: boolean;

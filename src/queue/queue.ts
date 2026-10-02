@@ -217,42 +217,40 @@ export class Queue<Payload = unknown, Result = unknown> {
       const lockToken = randomUUID();
       const lockExpiresAt = now + visibilityMs;
 
-      let claimed = false;
-      let claimedRecord: PhysicalRecord<QueueColumns, JobData<Payload, Result>> | undefined;
-
       try {
-        await this.table.update(jobId, (current) => {
-          // Inside the driver transaction / row lock, verify the job is still claimable
-          const rec = record.columns;
+        const updated = await this.table.updateRecord(jobId, (current) => {
+          if (!current) {
+            throw new Error("Job not found");
+          }
+          const rec = current.columns;
           const isClaimable =
             rec.state === "waiting" ||
             rec.state === "delayed" ||
             (rec.state === "active" && typeof rec.lockExpiresAt === "number" && rec.lockExpiresAt <= now);
 
           if (!isClaimable) {
-            return current;
+            throw new Error("Job already claimed by another worker");
           }
 
-          claimed = true;
-          return current;
-        }, {
-          keys: {
-            state: "active",
-            lockToken,
-            lockExpiresAt,
-            attempts: (record.columns.attempts ?? 0) + 1,
-            updatedAt: now,
-          },
+          return {
+            value: current.value,
+            columns: {
+              state: "active",
+              lockToken,
+              lockExpiresAt,
+              attempts: (rec.attempts ?? 0) + 1,
+              updatedAt: now,
+            },
+          };
         });
 
-        if (claimed) {
-          claimedRecord = await this.table.getRecord(jobId);
-          if (claimedRecord && claimedRecord.columns.lockToken === lockToken) {
-            return this.toJob(claimedRecord);
-          }
-        }
+        return this.toJob({
+          key: jobId,
+          value: updated.value,
+          columns: updated.columns,
+        });
       } catch {
-        // Lost race with concurrent worker, continue to next candidate
+        // Lost race with concurrent worker, transaction was safely rolled back. Continue to next candidate.
         continue;
       }
     }

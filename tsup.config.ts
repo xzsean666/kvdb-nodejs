@@ -8,4 +8,5 @@ export default defineConfig({
   clean: true,
   target: "es2023",
   shims: true,
+  external: ["better-sqlite3", "mongodb", "pg", "mysql2", "ioredis"],
 });

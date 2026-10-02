@@ -38,14 +38,22 @@
   },
   "peerDependencies": {
     "better-sqlite3": "*",
+    "ioredis": "*",
     "mongodb": "*",
+    "mysql2": "*",
     "pg": "*"
   },
   "peerDependenciesMeta": {
     "better-sqlite3": {
       "optional": true
     },
+    "ioredis": {
+      "optional": true
+    },
     "mongodb": {
+      "optional": true
+    },
+    "mysql2": {
       "optional": true
     },
     "pg": {

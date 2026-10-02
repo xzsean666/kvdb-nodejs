@@ -71,6 +71,17 @@ export interface KVDBOptions {
   ttlCleanupIntervalMs?: number;
   /** Global micro-batch write & coalescing configuration. */
   autoBatch?: boolean | AutoBatchOptions;
+  /**
+   * Driver connection pool / client tuning options (max, timeout, ssl, etc.).
+   * Passed through to the underlying pool or client.
+   */
+  pool?: Record<string, unknown>;
+  /**
+   * Automatically register process exit hooks (SIGTERM, SIGINT, beforeExit)
+   * to guarantee in-memory batches are flushed and connections cleanly closed.
+   * Default: false.
+   */
+  gracefulShutdown?: boolean;
 }
 
 export interface TableOptions<Columns extends Record<string, unknown> = Record<string, unknown>> {
@@ -101,6 +112,10 @@ export class KVDB {
   private readonly activeWorkers = new Set<Worker<any, any>>();
   private driverPromise: Promise<Driver> | undefined;
   private cleanupTimer: ReturnType<typeof setInterval> | undefined;
+  private exitHookRegistered = false;
+  private readonly boundShutdown = () => {
+    void this.close();
+  };
 
   constructor(options: KVDBOptions) {
     this.factory = createDriverFactory(options);
@@ -111,6 +126,27 @@ export class KVDB {
     this.autoIndex = resolveAutoIndex(options.autoIndex);
     this.ttlCleanupIntervalMs = options.ttlCleanupIntervalMs;
     this.autoBatch = options.autoBatch;
+    if (options.gracefulShutdown) {
+      this.registerShutdownHooks();
+    }
+  }
+
+  /** Register OS process signal listeners (SIGTERM, SIGINT, beforeExit) for clean shutdown. */
+  registerShutdownHooks(): void {
+    if (this.exitHookRegistered) return;
+    this.exitHookRegistered = true;
+    process.once("SIGTERM", this.boundShutdown);
+    process.once("SIGINT", this.boundShutdown);
+    process.once("beforeExit", this.boundShutdown);
+  }
+
+  /** Unregister OS process signal listeners. */
+  unregisterShutdownHooks(): void {
+    if (!this.exitHookRegistered) return;
+    this.exitHookRegistered = false;
+    process.removeListener("SIGTERM", this.boundShutdown);
+    process.removeListener("SIGINT", this.boundShutdown);
+    process.removeListener("beforeExit", this.boundShutdown);
   }
 
   /** Create a namespaced Table. Values are typed via the `Value` parameter. */
@@ -223,6 +259,7 @@ export class KVDB {
   }
 
   async close(): Promise<void> {
+    this.unregisterShutdownHooks();
     if (this.cleanupTimer !== undefined) {
       clearInterval(this.cleanupTimer);
       this.cleanupTimer = undefined;
@@ -246,6 +283,30 @@ export class KVDB {
     const driver = await this.driverPromise;
     this.driverPromise = undefined;
     await driver.close();
+  }
+
+  /**
+   * High-availability health probe for container orchestrators (e.g. Kubernetes Liveness/Readiness probes).
+   * Verifies real driver round-trip connectivity.
+   */
+  async healthCheck(): Promise<{ ok: boolean; provider: string; latencyMs: number; error?: string }> {
+    const start = Date.now();
+    try {
+      const driver = await this.getDriver();
+      await driver.has("__kvdb_health_probe__");
+      return {
+        ok: true,
+        provider: driver.provider,
+        latencyMs: Date.now() - start,
+      };
+    } catch (err) {
+      return {
+        ok: false,
+        provider: this.factory.provider,
+        latencyMs: Date.now() - start,
+        error: err instanceof Error ? err.message : String(err),
+      };
+    }
   }
 
   /** Lazily connect once; subsequent callers await the same connection. */
@@ -283,6 +344,7 @@ function createDriverFactory(options: KVDBOptions): DriverFactory {
         url: options.url,
         table: options.table,
         indexes: options.indexes,
+        poolOptions: options.pool,
       });
     case "mongodb":
       if (options.url === undefined) {
@@ -292,11 +354,13 @@ function createDriverFactory(options: KVDBOptions): DriverFactory {
         url: options.url,
         collection: options.table,
         indexes: options.indexes,
+        clientOptions: options.pool,
       });
     case "redis":
       return new RedisDriverFactory({
         url: options.url,
         keyPrefix: options.tablePrefix,
+        redisOptions: options.pool,
       });
     case "mysql":
       if (options.url === undefined) {
@@ -306,6 +370,7 @@ function createDriverFactory(options: KVDBOptions): DriverFactory {
         url: options.url,
         table: options.table,
         indexes: options.indexes,
+        poolOptions: options.pool as any,
       });
     default: {
       const unknown: never = options.driver;

@@ -82,6 +82,8 @@ export interface MongoDriverOptions {
    * Default: none — only the `_id` index Mongo creates automatically exists.
    */
   indexes?: string[];
+  /** Optional mongodb MongoClient options (maxPoolSize, minPoolSize, connectTimeoutMS, etc.). */
+  clientOptions?: Record<string, unknown>;
 }
 
 export class MongoDriverFactory implements DriverFactory {
@@ -102,7 +104,7 @@ export class MongoDriverFactory implements DriverFactory {
         { cause },
       );
     }
-    const client = new MongoClientCtor(this.options.url);
+    const client = new MongoClientCtor(this.options.url, this.options.clientOptions);
     await client.connect();
     const db = this.options.database ? client.db(this.options.database) : client.db();
     const collection = db.collection<KvDocument>(this.options.collection ?? "kvdb_kv");

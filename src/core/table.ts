@@ -547,6 +547,99 @@ export class Table<Value = JsonValue, Columns extends Record<string, unknown> = 
     return written;
   }
 
+  /**
+   * Atomically read-modify-write a schema table record (both value and secondary keys/columns)
+   * under row-level lock or transaction.
+   *
+   * Mutator receives { value, columns, expiresAt } and returns updated value and/or columns.
+   * If mutator throws, transaction aborts and row remains untouched.
+   */
+  async updateRecord(
+    key: string | number,
+    mutate: (current: { value: Value; columns: Columns; expiresAt?: number } | undefined) => {
+      value?: Value;
+      columns?: Partial<Columns>;
+      ttlMs?: number;
+    },
+  ): Promise<{ value: Value; columns: Columns }> {
+    const strKey = String(key);
+    if (this.writeBatcher) {
+      await this.writeBatcher.flush();
+    }
+
+    const schema = await this.schemaDriver();
+    if (!schema) {
+      throw new KvdbError(
+        "CONFIG",
+        `Cannot call updateRecord() on table "${this.namespace}": table is not a Schema Table.`,
+      );
+    }
+
+    const cKey = this.cacheKey(strKey, true);
+    let finalValue!: Value;
+    let finalColumns!: Columns;
+
+    if (schema.updateRecord) {
+      await schema.updateRecord(key, (current) => {
+        let parsedCurrent: { value: Value; columns: Columns; expiresAt?: number } | undefined;
+        if (current) {
+          parsedCurrent = {
+            value: deserialize<Value>(current.value),
+            columns: current.columns as Columns,
+            expiresAt: current.expiresAt,
+          };
+        }
+        const mutation = mutate(parsedCurrent);
+        finalValue = mutation.value !== undefined ? mutation.value : parsedCurrent ? parsedCurrent.value : (undefined as any);
+        const mergedCols = {
+          ...(parsedCurrent ? parsedCurrent.columns : {}),
+          ...(mutation.columns ?? {}),
+        } as Record<string, unknown>;
+        const validatedCols = validateColumnValues(schema.schema, mergedCols);
+        finalColumns = validatedCols as Columns;
+        const ttl = mutation.ttlMs ?? (parsedCurrent?.expiresAt ? ttlFromExpiry(parsedCurrent.expiresAt) : undefined);
+
+        return {
+          value: serialize(finalValue as JsonValue),
+          columns: validatedCols,
+          ttlMs: ttl,
+        };
+      });
+    } else {
+      const record = await schema.getRecord(key);
+      let parsedCurrent: { value: Value; columns: Columns; expiresAt?: number } | undefined;
+      if (record) {
+        parsedCurrent = {
+          value: deserialize<Value>(record.value),
+          columns: record.columns as Columns,
+          expiresAt: record.expiresAt,
+        };
+      }
+      const mutation = mutate(parsedCurrent);
+      finalValue = mutation.value !== undefined ? mutation.value : parsedCurrent ? parsedCurrent.value : (undefined as any);
+      const mergedCols = {
+        ...(parsedCurrent ? parsedCurrent.columns : {}),
+        ...(mutation.columns ?? {}),
+      } as Record<string, unknown>;
+      const validatedCols = validateColumnValues(schema.schema, mergedCols);
+      finalColumns = validatedCols as Columns;
+      const ttl = mutation.ttlMs ?? (parsedCurrent?.expiresAt ? ttlFromExpiry(parsedCurrent.expiresAt) : undefined);
+
+      await schema.setRecord(key, serialize(finalValue as JsonValue), validatedCols, ttl);
+    }
+
+    if (this.deps.cache) await this.deps.cache.set(cKey, finalValue);
+    if (this.deps.hooks.has("afterWrite")) {
+      await this.deps.hooks.run("afterWrite", {
+        namespace: this.namespace,
+        key: strKey,
+        value: finalValue as JsonValue,
+      });
+    }
+    await this.invalidateQueryCache();
+    return { value: finalValue, columns: finalColumns };
+  }
+
   async get(key: string | number): Promise<Value | undefined> {
     const strKey = String(key);
     if (this.writeBatcher) {

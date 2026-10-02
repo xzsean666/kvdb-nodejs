@@ -140,23 +140,23 @@ export class Cache {
   }
 
   async wrap<V>(key: string, fn: () => Promise<V>, options: WrapOptions = {}): Promise<V> {
-    const hit = await this.readRaw(key);
-    if (hit !== undefined) {
-      const value = deserialize<V>(hit.value);
-      const threshold = options.refreshThreshold;
-      if (threshold !== undefined && remainingTtl(hit, Date.now()) < threshold) {
-        this.refreshInBackground(key, fn, options.ttlMs);
-      }
-      return value;
-    }
-
     const inFlight = this.inFlightMisses.get(key);
     if (inFlight !== undefined) {
       return inFlight as Promise<V>;
     }
 
-    const promise = (async () => {
+    const runner = (async () => {
       try {
+        const hit = await this.readRaw(key);
+        if (hit !== undefined) {
+          const value = deserialize<V>(hit.value);
+          const threshold = options.refreshThreshold;
+          if (threshold !== undefined && remainingTtl(hit, Date.now()) < threshold) {
+            this.refreshInBackground(key, fn, options.ttlMs);
+          }
+          return value;
+        }
+
         const value = await fn();
         await this.set(key, value, options.ttlMs);
         return value;
@@ -165,8 +165,8 @@ export class Cache {
       }
     })();
 
-    this.inFlightMisses.set(key, promise);
-    return promise;
+    this.inFlightMisses.set(key, runner);
+    return runner;
   }
 
   /** Read the first live entry across tiers, backfilling higher (closer) tiers. */

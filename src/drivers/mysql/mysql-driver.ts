@@ -15,6 +15,8 @@ import type {
 } from "../types.js";
 import type { KVEntry, RawEntry } from "../../cache/types.js";
 import type { QueryNode, FindOptions } from "../../query/ast.js";
+import { compileWhere, compileOrderBy } from "../../query/compiler.js";
+import { MysqlDialect } from "./dialect.js";
 import { evaluateQuery, sortDocuments } from "../../query/evaluator.js";
 import { deserialize, serialize } from "../../core/serializer.js";
 import { KvdbConfigError, KvdbConnectionError } from "../../core/errors.js";
@@ -35,11 +37,20 @@ import {
 } from "../../core/table-schema.js";
 import { expiresAtFromTtl } from "../../core/expiry.js";
 
+export interface MysqlPoolOptions {
+  connectionLimit?: number;
+  queueLimit?: number;
+  connectTimeout?: number;
+  ssl?: unknown;
+}
+
 export interface MysqlDriverOptions {
   /** MySQL connection URL (e.g., "mysql://root:password@127.0.0.1:3306/database"). */
   url?: string;
   /** Existing mysql2 Pool instance. */
   pool?: Pool;
+  /** Connection pool tuning options. */
+  poolOptions?: MysqlPoolOptions;
   /** Primary physical KV table name. Default "kvdb_kv". */
   table?: string;
   /** Pre-created value-path indexes (if any). */
@@ -65,7 +76,7 @@ export class MysqlDriverFactory implements DriverFactory {
   readonly provider: ProviderName = "mysql";
   readonly capabilities: DriverCapabilities = {
     nativeTtl: false,
-    jsonQuery: "none",
+    jsonQuery: "mysql-json",
     managesOwnPool: true,
     supportsTransactions: true,
     supportsPrefixScan: true,
@@ -86,8 +97,10 @@ export class MysqlDriverFactory implements DriverFactory {
       pool = mysql.createPool({
         uri: this.options.url,
         waitForConnections: true,
-        connectionLimit: 10,
-        queueLimit: 0,
+        connectionLimit: this.options.poolOptions?.connectionLimit ?? 10,
+        queueLimit: this.options.poolOptions?.queueLimit ?? 0,
+        connectTimeout: this.options.poolOptions?.connectTimeout,
+        ssl: this.options.poolOptions?.ssl,
         charset: "utf8mb4",
       }) as Pool;
       ownsPool = true;
@@ -113,11 +126,12 @@ export class MysqlDriver implements Driver {
   readonly provider: ProviderName = "mysql";
   readonly capabilities: DriverCapabilities = {
     nativeTtl: false,
-    jsonQuery: "none",
+    jsonQuery: "mysql-json",
     managesOwnPool: true,
     supportsTransactions: true,
     supportsPrefixScan: true,
   };
+  private readonly dialect = new MysqlDialect("value");
 
   constructor(
     private readonly pool: Pool,
@@ -272,42 +286,34 @@ export class MysqlDriver implements Driver {
     options: FindOptions = {},
     keyPrefix?: string,
   ): Promise<KVEntry[]> {
-    const now = Date.now();
-    let sql = `SELECT \`key\`, \`value\` FROM \`${this.table}\` WHERE (\`expires_at\` IS NULL OR \`expires_at\` > ?)`;
-    const params: unknown[] = [now];
+    const compiled = compileWhere(where, this.dialect);
+    const clauses = [`(\`expires_at\` IS NULL OR \`expires_at\` > ?)`, `(${compiled.sql})`];
+    const params: unknown[] = [Date.now(), ...compiled.params];
+
     if (keyPrefix) {
-      sql += ` AND \`key\` LIKE ?`;
+      clauses.push(`\`key\` LIKE ?`);
       params.push(`${escapeLike(keyPrefix)}%`);
     }
 
-    const [rows] = await this.pool.query<RowDataPacket[]>(sql, params);
-    const candidates: Array<{ key: string; value: string; doc: unknown }> = [];
-    for (const r of rows) {
-      try {
-        candidates.push({
-          key: r.key,
-          value: r.value,
-          doc: deserialize(r.value),
-        });
-      } catch {
-        // Non-JSON ignored
+    let sql = `SELECT \`key\`, \`value\` FROM \`${this.table}\` WHERE ${clauses.join(" AND ")}`;
+    if (options.sort && options.sort.length > 0) {
+      sql += ` ORDER BY ${compileOrderBy(options.sort, this.dialect)}`;
+    }
+    if (options.limit !== undefined) {
+      sql += ` LIMIT ?`;
+      params.push(options.limit);
+    }
+    if (options.offset !== undefined) {
+      if (options.limit === undefined) {
+        sql += ` LIMIT 18446744073709551615 OFFSET ?`;
+      } else {
+        sql += ` OFFSET ?`;
       }
+      params.push(options.offset);
     }
 
-    const filtered = candidates.filter((item) => evaluateQuery(where, item.doc));
-    const sorted = sortDocuments(
-      filtered.map((item) => ({ ...item, value: item.doc })),
-      options.sort,
-    );
-
-    let result = sorted;
-    if (options.offset !== undefined) result = result.slice(options.offset);
-    if (options.limit !== undefined) result = result.slice(0, options.limit);
-
-    return result.map((item) => {
-      const orig = filtered.find((c) => c.key === item.key)!;
-      return { key: orig.key, value: orig.value };
-    });
+    const [rows] = await this.pool.query<RowDataPacket[]>(sql, params);
+    return rows.map((r) => ({ key: r.key, value: r.value }));
   }
 
   async update(key: string, mutate: UpdateMutator): Promise<void> {
@@ -634,49 +640,34 @@ class MysqlSchemaTable<Columns extends Record<string, unknown>>
       columns: Record<string, unknown>;
     }>
   > {
+    const dialect = new MysqlDialect("value");
+    const compiled = compileWhere(where, dialect);
+    const params: unknown[] = [Date.now(), ...compiled.params];
+
+    let sql = `SELECT * FROM \`${this.table}\` WHERE (\`expires_at\` IS NULL OR \`expires_at\` > ?) AND (${compiled.sql})`;
+    if (options.sort && options.sort.length > 0) {
+      sql += ` ORDER BY ${compileOrderBy(options.sort, dialect)}`;
+    }
+    if (options.limit !== undefined) {
+      sql += ` LIMIT ?`;
+      params.push(options.limit);
+    }
+    if (options.offset !== undefined) {
+      if (options.limit === undefined) {
+        sql += ` LIMIT 18446744073709551615 OFFSET ?`;
+      } else {
+        sql += ` OFFSET ?`;
+      }
+      params.push(options.offset);
+    }
+
+    const [rows] = await this.pool.query<RowDataPacket[]>(sql, params);
     const pk = this.pkName;
-    const now = Date.now();
-    const [rows] = await this.pool.query<RowDataPacket[]>(
-      `SELECT * FROM \`${this.table}\` WHERE (\`expires_at\` IS NULL OR \`expires_at\` > ?)`,
-      [now],
-    );
-
-    const candidates = rows.map((row) => {
-      const rawVal = deserialize(row.value);
-      const docObj =
-        typeof rawVal === "object" && rawVal !== null && !Array.isArray(rawVal)
-          ? (rawVal as Record<string, unknown>)
-          : {};
-      return {
-        key: this.parsePk(row[pk]),
-        value: row.value as string,
-        columns: this.parseColumns(row as Record<string, unknown>),
-        doc: {
-          ...docObj,
-          ...this.parseColumns(row as Record<string, unknown>),
-          [pk]: this.parsePk(row[pk]),
-        },
-      };
-    });
-
-    const filtered = candidates.filter((item) => evaluateQuery(where, item.doc));
-    const sorted = sortDocuments(
-      filtered.map((item) => ({ ...item, value: item.doc })),
-      options.sort,
-    );
-
-    let result = sorted;
-    if (options.offset !== undefined) result = result.slice(options.offset);
-    if (options.limit !== undefined) result = result.slice(0, options.limit);
-
-    return result.map((item) => {
-      const orig = filtered.find((c) => c.key === item.key)!;
-      return {
-        key: orig.key,
-        value: orig.value,
-        columns: orig.columns,
-      };
-    });
+    return rows.map((row) => ({
+      key: this.parsePk(row[pk]),
+      value: row.value as string,
+      columns: this.parseColumns(row as Record<string, unknown>),
+    }));
   }
 
   async updateRecord(
