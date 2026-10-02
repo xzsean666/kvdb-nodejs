@@ -166,5 +166,21 @@
   2. **初次查询防击穿 Promise 链**：若 Key 正在被首个 `update` 从 DB 异步读取，后继并发 `update` 自动排队接入该 Key 的在途 Promise 链，等数据返回后串行执行更新，杜绝丢失更新。
   3. **读己之写（RYW）保障**：`table.get` / `getMany` / `find` 在读取前，先检测并执行 `flush()`（或针对点查直接内存直通命中），杜绝读到旧数据。
 
+### KD-BATCH4. 严格保序流水线与并发 Flush 屏障防穿透
+- **背景与理由**：
+  在 `coalesce: false` 严格保序模式下，若将操作拆分为 sets 与 deletes 集合，会导致先删后写的顺序被倒置为先写后删，引起数据丢失；并发调用 `table.flush()` 时，若后唤醒的调用者因队列被清空而误判提前返回，会导致落盘屏障失效。
+- **决策内容**：
+  1. **统一操作流（Unified Op Stream）**：当 `coalesce: false` 时，导出保序 `operations: BatchOpItem[]` 操作流，驱动层按时序逐条执行写与删，彻底根除顺序倒置。
+  2. **Sequence/Generation 屏障锁**：以单调递增的批次序列号记录每次 `flush()` 调用时的目标版本，确保并发调用方等待其所属批次真正完成持久化后才返回。
+  3. **零异常吞没守则**：批次落盘失败时，错误不仅分发给每条调用的 reject，同时向外重新抛出，确保 `await table.flush()` 如实感知写失败。
+
+### KD-BATCH5. Table 单例缓存治理与 In-Flight Snapshot 穿透读
+- **背景与理由**：
+  频繁调用 `kvdb.table(ns)` 会导致 Table 实例无界增长并堆积在全局集合中引发内存泄漏（OOM），且多实例隔离导致跨函数调用的 RYW 失效；批处理写库期间全局阻塞所有 `table.get` 会引发不相干读请求的严重延迟毛刺。
+- **决策内容**：
+  1. **Table 实例单例化缓存**：`KVDB` 内部使用 `tableCache: Map<string, Table>` 对标准命名空间进行单例复用，根治无界内存泄漏，并确保整个进程内同命名空间共享微批缓冲与 100% 跨调用 RYW。
+  2. **In-Flight Snapshot 穿透读**：批处理执行期间将正在落盘的快照维护为 `inFlightSnapshot`。点查 `get(k)` 优先命中 pending 与 in-flight 内存层（0-RTT 直读）；对于不相干的 Key 直接放行读取底层 DB/Cache，杜绝全局读阻塞。
+
+
 
 

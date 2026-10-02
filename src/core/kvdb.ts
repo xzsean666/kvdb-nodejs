@@ -88,7 +88,7 @@ export class KVDB {
   private readonly autoIndex: AutoIndexManager | undefined;
   private readonly ttlCleanupIntervalMs: number | undefined;
   private readonly autoBatch: boolean | AutoBatchOptions | undefined;
-  private readonly tables = new Set<Table<any, any>>();
+  private readonly tableCache = new Map<string, Table<any, any>>();
   private driverPromise: Promise<Driver> | undefined;
   private cleanupTimer: ReturnType<typeof setInterval> | undefined;
 
@@ -108,6 +108,13 @@ export class KVDB {
     namespace: string,
     options: TableOptions<Columns> = {},
   ): Table<Value, Columns> {
+    const hasCustomOptions = options.cache || options.schema || options.autoBatch !== undefined;
+    const cacheKey = namespace;
+    if (!hasCustomOptions) {
+      const cached = this.tableCache.get(cacheKey);
+      if (cached) return cached as Table<Value, Columns>;
+    }
+
     const cache = options.cache ? toCache(options.cache) : this.cache;
     const autoBatch = resolveAutoBatchOptions(options.autoBatch, this.autoBatch);
     const tbl = new Table<Value, Columns>({
@@ -120,7 +127,7 @@ export class KVDB {
       schema: options.schema,
       autoBatch,
     });
-    this.tables.add(tbl);
+    this.tableCache.set(cacheKey, tbl);
     return tbl;
   }
 
@@ -157,9 +164,9 @@ export class KVDB {
     }
     // Flush all active tables before closing driver
     await Promise.all(
-      Array.from(this.tables).map((t) => t.flush().catch(() => {})),
+      Array.from(this.tableCache.values()).map((t) => t.flush().catch(() => {})),
     );
-    this.tables.clear();
+    this.tableCache.clear();
 
     if (this.driverPromise === undefined) return;
     const driver = await this.driverPromise;

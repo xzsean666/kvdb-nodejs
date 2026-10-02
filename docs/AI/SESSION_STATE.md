@@ -7,36 +7,34 @@
 
 ## 1. 核心状态概要
 
-- **当前 Goal**: 高性能微批处理与写聚合子系统 (TASK-029-AUTO-BATCH)
-- **当前 Task**: 交付生产级 Auto Batch 引擎、Multi-Key 增量浅合并、Postgres 防死锁排序、内存直通与防击穿 (Step 1-4 全部完成)
-- **当前状态**: **COMPLETED_AND_VERIFIED** (已完成代码实现、全量测试 208 通过、构建与 22 个实战示例 100% 绿灯)
+- **当前 Goal**: 高性能微批处理与写聚合子系统生产就绪加固 (TASK-030-PRODUCTION-HARDENING)
+- **当前 Task**: 工业级并发时序保序、异常透传、Table 单例缓存防 OOM 与 In-Flight 快照穿透读 (已全部完成)
+- **当前状态**: **COMPLETED_AND_VERIFIED** (已完成代码重构加固、全量测试 214 通过、构建与 22 个实战示例 100% 绿灯)
 
 ---
 
-## 2. 本次任务完成内容与优化清单
+## 2. 本次加固优化内容清单 (TASK-030)
 
-### A. Auto Batch 核心与安全硬化 (TASK-029-AUTO-BATCH)
-1. **统一高性能微批缓冲引擎 (`src/core/batcher.ts`)**:
-   - 实现 `WriteBatcher<V>`，提供时间窗口（`maxWaitMs` 默认 20ms）与容量阈值（`maxBatchSize` 默认 50 条）自动排空。
-   - 内存容量背压保护（`maxBufferSize` 默认 `maxBatchSize * 10`），超过阈值时触发强制同步排空，防止恶性突发流量打爆 Node.js 堆内存。
-   - 零异常吞没（Zero Error Swallowing）：当底层写失败时，精准将底层错误分发给批次内每一个 Promise 调用方，不吞没不卡死。
-   - 移除不当的 `timer.unref()`，保证 Node.js 在微批排队窗口期内可靠结算落地。
+### A. 并发时序保序与写删一致性
+1. **严格保序流水线 (`coalesce: false`)**:
+   - `BatchFlushPayload` 升级支持 `operations: BatchOpItem[]`。
+   - 当关闭写折叠时，底层驱动按严格 FIFO 调用流依次执行 `set` 与 `delete`，彻底解决先删后写被颠倒为先写后删导致数据丢失的严重缺陷。
 
-2. **Multi-Key 物理二级索引深度支持与原型链防御**:
-   - 物理 Schema 表（`TableSchema` / `MultiKeySchema`）深度集成。
-   - `sanitizeSecondaryKeys` 严格过滤 `__proto__`, `constructor`, `prototype`，杜绝原型链污染。
-   - 内存折叠模式下对同 Key 的二级键执行增量浅合并（`mergedKeys = { ...existing.keys, ...newItem.keys }`），并发写入不丢失物理索引字段。
+### B. 落盘屏障与异常完整传播
+2. **基于 Sequence/Generation 的并发 Flush 屏障**:
+   - 记录进入 `flush()` 时的批次目标序列号，直到所属批次真正完成 I/O 持久化后才返回，彻底根绝因并发唤醒清空队列误判提前返回的竞态屏障穿透。
+3. **零异常吞没 (Zero Error Swallowing)**:
+   - `executeFlush()` 在底层落盘失败时不仅分发给每条操作的 reject，同时向外重新 `throw err`，确保应用显式调用 `await table.flush()` 时能如实捕获数据库失败异常。
+4. **连续 Delete 契约修复**:
+   - 修复同 Key 连续 delete 时第一次调用提前以 `undefined` resolve 的类型破坏问题，所有调用方均可靠收到实际执行结果。
 
-3. **两层聚合正交可配置 (`coalesce` & `sqlAggregation`)**:
-   - `coalesce: true`（默认）：内存层同 Key 覆盖写与写删抵消，大幅压降数据库 I/O 与 PostgreSQL MVCC 死元组。
-   - `coalesce: false`：严格保序微批（FIFO），保留每一条写操作（满足 CDC/触发器审计场景）。
-   - `sqlAggregation: true`（默认）：生成单条 multi-row SQL 语句。
-   - `sqlAggregation: false`：在单事务内循环执行独立 Prepared Statements。
-
-4. **同 Key 并发冲突治理与数据一致性**:
-   - 内存直通更新（In-Memory Fast-Path）：已在缓冲中的 Key 立即在内存中同步执行原子累加或计算，0 次数据库读 RTT。
-   - 初次查询防击穿链（In-Flight Deduplication）：并发首更复用在途 Promise 链，排队执行，杜绝丢失更新（压力测试 50 并发累加 100% 准确）。
-   - 读己之写（RYW）保证：`get(k)` 优先内存直通命中，`find()` / `getRecord()` 前置透明排空。
+### C. 资源生命周期与读取毛刺消除
+5. **Table 实例单例化治理**:
+   - `KVDB` 引入 `tableCache: Map<string, Table>`，相同命名空间自动复用 Table 单例，根治高并发下 Table 实例无界增长导致的堆内存泄漏（OOM），并保障跨模块/跨函数调用的 100% RYW 内存直通。
+6. **In-Flight Snapshot 穿透点查**:
+   - 批处理执行写库期间，正在落盘的快照维护为 `inFlightSnapshot`。点查操作优先从内存直读（0-RTT），不相干 Key 直接穿透查库，彻底消除了写库期间无差别阻塞读请求引起的延迟毛刺（Latency Spike）。
+7. **Node.js 优雅退出**:
+   - 异步排空定时器统一引入 `timer.unref?.()`，保证在没有其他网络/事件循环任务时 Node.js 进程可以自然退出。
 
 5. **PostgreSQL 交叉行锁死锁消除 (Deadlock Prevention)**:
    - `compareKeysDeterministic`: 在将批次下发给 PostgreSQL（`setRecords` 与 `setMany`）前，对待写主键进行严格确定性升序排序，使所有并发事务获取行锁的顺序永远单调一致，数学上彻底根除 `deadlock detected`。
@@ -59,7 +57,7 @@
 - `docs/AI/tasks/TASK-029-AUTO-BATCH.md`: 完整任务规格与技术卡片。
 - `docs/AI/DECISIONS.md`: 记录 `KD-BATCH1`, `KD-BATCH2`, `KD-BATCH3`。
 - `docs/SPEC.md`: 新增 §13 Auto Batch 规格章节。
-- `test/unit/auto-batch.test.ts`: 全量 18 项深度测试全部通过。
+- `test/unit/auto-batch.test.ts`: 全量 24 项深度测试全部通过（新增 6 项生产级加固测试）。
 - `examples/22-auto-batch-coalescing.ts`: 官方高并发写聚合实战示例。
 
 ---
@@ -79,7 +77,7 @@
 
 ## 5. 全量验证结果
 
-- `pnpm test`: **208 tests passing (100% 全部通过，20 个测试套件)**，耗时 ~1.4s。
+- `pnpm test`: **214 tests passing (100% 全部通过，20 个测试套件)**，耗时 ~1.7s。
 - `pnpm typecheck`: **0 errors** (TypeScript 严苛类型检查完全通过)。
 - `pnpm build`: **构建成功**，输出 ESM、CJS 与 `.d.ts` 类型定义。
 - `pnpm examples`: **22 个官方实战示例全部成功运行通过 (100%)**。

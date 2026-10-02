@@ -6,8 +6,6 @@
 // and SQL multi-row aggregation vs single-statement execution), deterministic primary key sorting
 // for PostgreSQL deadlock prevention, unref'd timer for graceful shutdown, and zero error swallowing.
 
-import { KvdbError } from "./errors.js";
-
 export interface AutoBatchOptions {
   /**
    * Maximum number of write items to accumulate before triggering an immediate flush.
@@ -80,6 +78,12 @@ export interface BatchSetItem<V = unknown> {
   ttlMs?: number;
 }
 
+export interface BatchOpItem<V = unknown> {
+  type: BatchOpType;
+  key: string | number;
+  item?: BatchSetItem<V>;
+}
+
 export interface PendingBatchItem<V = unknown> {
   key: string | number;
   type: BatchOpType;
@@ -92,6 +96,7 @@ export interface PendingBatchItem<V = unknown> {
 export interface BatchFlushPayload<V = unknown> {
   sets: readonly BatchSetItem<V>[];
   deletes: readonly (string | number)[];
+  operations: readonly BatchOpItem<V>[];
   sqlAggregation: boolean;
 }
 
@@ -149,8 +154,14 @@ export class WriteBatcher<V = unknown> {
   /** FIFO list used when coalesce=false */
   private pendingList: PendingBatchItem<V>[] = [];
 
+  /** Currently in-flight snapshot being written to storage (for 0-RTT point lookup) */
+  private inFlightSnapshot: Map<string, PendingBatchItem<V>> | null = null;
+
+  /** Sequence tracking for barrier guarantees */
+  private currentSeq = 0;
+  private completedSeq = 0;
+
   private timer: NodeJS.Timeout | null = null;
-  private isFlushing = false;
   private activeFlushPromise?: Promise<void>;
 
   constructor(
@@ -172,6 +183,8 @@ export class WriteBatcher<V = unknown> {
     if (this.pendingCount >= this.maxBufferSize) {
       await this.flush();
     }
+
+    this.currentSeq++;
 
     return new Promise<void>((resolve, reject) => {
       const sanitizedKeys = sanitizeSecondaryKeys(item.keys);
@@ -229,21 +242,29 @@ export class WriteBatcher<V = unknown> {
       await this.flush();
     }
 
+    this.currentSeq++;
+
     return new Promise<boolean>((resolve, reject) => {
       const strKey = String(key);
       if (this.coalesceEnabled) {
         const existing = this.pendingMap.get(strKey);
         if (existing) {
-          const hadPriorSet = existing.type === "set" || Boolean(existing.hadPriorSetInSameWindow);
-          // Resolve previous set callers because their write was replaced by this delete
-          for (const prevResolve of existing.resolves) {
-            prevResolve();
+          if (existing.type === "set") {
+            const hadPriorSet = true;
+            // Resolve previous set callers because their write was cancelled by this delete
+            for (const prevResolve of existing.resolves) {
+              prevResolve();
+            }
+            existing.type = "delete";
+            existing.item = undefined;
+            existing.hadPriorSetInSameWindow = hadPriorSet;
+            existing.resolves = [(delResult?: boolean) => resolve(delResult ?? true)];
+            existing.rejects = [reject];
+          } else {
+            // Already a pending delete; append resolution handler instead of resolving early!
+            existing.resolves.push((delResult?: boolean) => resolve(delResult ?? false));
+            existing.rejects.push(reject);
           }
-          existing.type = "delete";
-          existing.item = undefined;
-          existing.hadPriorSetInSameWindow = hadPriorSet;
-          existing.resolves = [(delResult?: boolean) => resolve(delResult ?? true)];
-          existing.rejects = [reject];
         } else {
           this.pendingMap.set(strKey, {
             key,
@@ -295,6 +316,14 @@ export class WriteBatcher<V = unknown> {
   }
 
   /**
+   * Retrieves a key from the in-flight snapshot currently being written to storage, if any.
+   * Enables 0-RTT point lookup while a flush is processing without blocking unrelated reads.
+   */
+  getInFlight(key: string | number): PendingBatchItem<V> | undefined {
+    return this.inFlightSnapshot?.get(String(key));
+  }
+
+  /**
    * Current number of queued items waiting in buffer.
    */
   get pendingCount(): number {
@@ -305,7 +334,7 @@ export class WriteBatcher<V = unknown> {
    * Whether a batch flush is currently in progress.
    */
   get isFlushingNow(): boolean {
-    return this.isFlushing;
+    return this.activeFlushPromise !== undefined;
   }
 
   private checkFlushConditions(): void {
@@ -316,6 +345,7 @@ export class WriteBatcher<V = unknown> {
         this.timer = null;
         void this.triggerFlush();
       }, this.maxWaitMs);
+      this.timer.unref?.();
     }
   }
 
@@ -324,11 +354,16 @@ export class WriteBatcher<V = unknown> {
       clearTimeout(this.timer);
       this.timer = null;
     }
-    await this.flush();
+    try {
+      await this.flush();
+    } catch {
+      // Background timer flush errors are dispatched to per-item promises.
+    }
   }
 
   /**
    * Immediately flushes all queued writes/deletes to the database.
+   * Guarantees all items enqueued prior to this call have completed disk/db persistence.
    */
   async flush(): Promise<void> {
     if (this.timer) {
@@ -336,17 +371,33 @@ export class WriteBatcher<V = unknown> {
       this.timer = null;
     }
 
-    // 1. If another flush is in flight, wait for it first
-    if (this.isFlushing && this.activeFlushPromise) {
-      await this.activeFlushPromise;
-    }
-
-    // 2. If nothing is pending, return cleanly
-    if (this.pendingCount === 0) {
+    const targetSeq = this.currentSeq;
+    if (this.pendingCount === 0 && this.completedSeq >= targetSeq) {
+      if (this.activeFlushPromise) {
+        await this.activeFlushPromise;
+      }
       return;
     }
 
-    this.isFlushing = true;
+    while (this.pendingCount > 0 || (this.activeFlushPromise && this.completedSeq < targetSeq)) {
+      if (!this.activeFlushPromise) {
+        this.activeFlushPromise = this.executeFlush();
+      }
+      try {
+        await this.activeFlushPromise;
+      } catch (err) {
+        throw err;
+      }
+    }
+  }
+
+  private async executeFlush(): Promise<void> {
+    if (this.pendingCount === 0) {
+      this.activeFlushPromise = undefined;
+      return;
+    }
+
+    const batchSeq = this.currentSeq;
     let snapshot: PendingBatchItem<V>[];
 
     if (this.coalesceEnabled) {
@@ -359,10 +410,23 @@ export class WriteBatcher<V = unknown> {
       this.pendingList = [];
     }
 
+    // Set in-flight snapshot map for 0-RTT point queries during write execution
+    const inFlightMap = new Map<string, PendingBatchItem<V>>();
+    for (const op of snapshot) {
+      inFlightMap.set(String(op.key), op);
+    }
+    this.inFlightSnapshot = inFlightMap;
+
     const sets: BatchSetItem<V>[] = [];
     const deletes: (string | number)[] = [];
+    const operations: BatchOpItem<V>[] = [];
 
     for (const op of snapshot) {
+      operations.push({
+        type: op.type,
+        key: op.key,
+        item: op.item,
+      });
       if (op.type === "set" && op.item) {
         sets.push(op.item);
       } else if (op.type === "delete") {
@@ -370,52 +434,54 @@ export class WriteBatcher<V = unknown> {
       }
     }
 
-    this.activeFlushPromise = (async () => {
-      try {
-        const result = await this.flushHandler({
-          sets,
-          deletes,
-          sqlAggregation: this.sqlAggregation,
-        });
+    try {
+      const result = await this.flushHandler({
+        sets,
+        deletes,
+        operations,
+        sqlAggregation: this.sqlAggregation,
+      });
 
-        const deletedSet =
-          result && typeof result === "object" && result.deletedKeys
-            ? result.deletedKeys
-            : undefined;
+      const deletedSet =
+        result && typeof result === "object" && result.deletedKeys
+          ? result.deletedKeys
+          : undefined;
 
-        for (const op of snapshot) {
-          if (op.type === "set") {
-            for (const resolve of op.resolves) resolve();
-          } else if (op.type === "delete") {
-            const wasDeleted =
-              op.hadPriorSetInSameWindow || (deletedSet ? deletedSet.has(op.key) : true);
-            for (const resolve of op.resolves) resolve(wasDeleted);
-          }
-        }
-      } catch (err) {
-        // Zero Error Swallowing: propagate error to every single caller in this batch
-        for (const op of snapshot) {
-          for (const reject of op.rejects) reject(err);
-        }
-      } finally {
-        this.isFlushing = false;
-        this.activeFlushPromise = undefined;
-
-        // If more items accumulated during execution, schedule follow-up flush
-        if (this.pendingCount > 0) {
-          if (this.pendingCount >= this.maxBatchSize) {
-            void this.triggerFlush();
-          } else if (!this.timer) {
-            this.timer = setTimeout(() => {
-              this.timer = null;
-              void this.triggerFlush();
-            }, this.maxWaitMs);
-          }
+      for (const op of snapshot) {
+        if (op.type === "set") {
+          for (const resolve of op.resolves) resolve();
+        } else if (op.type === "delete") {
+          const wasDeleted =
+            op.hadPriorSetInSameWindow || (deletedSet ? deletedSet.has(op.key) : true);
+          for (const resolve of op.resolves) resolve(wasDeleted);
         }
       }
-    })();
+      this.completedSeq = batchSeq;
+    } catch (err) {
+      // Zero Error Swallowing: propagate error to every single caller in this batch
+      for (const op of snapshot) {
+        for (const reject of op.rejects) reject(err);
+      }
+      this.completedSeq = batchSeq;
+      // Re-throw so callers awaiting table.flush() will never silently swallow errors!
+      throw err;
+    } finally {
+      this.inFlightSnapshot = null;
+      this.activeFlushPromise = undefined;
 
-    await this.activeFlushPromise;
+      // If more items accumulated during execution, schedule follow-up flush
+      if (this.pendingCount > 0) {
+        if (this.pendingCount >= this.maxBatchSize) {
+          void this.triggerFlush();
+        } else if (!this.timer) {
+          this.timer = setTimeout(() => {
+            this.timer = null;
+            void this.triggerFlush();
+          }, this.maxWaitMs);
+          this.timer.unref?.();
+        }
+      }
+    }
   }
 
   /**

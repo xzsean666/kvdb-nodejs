@@ -364,4 +364,123 @@ describe("TASK-029: Auto Batch & Write Coalescing Engine", () => {
       await globalDb.close();
     });
   });
+
+  describe("7. Production Hardening, Edge Cases & Consistency Guarantees", () => {
+    it("coalesce: false strictly preserves execution order of delete then set", async () => {
+      const table = db.table<string>("order_preservation", {
+        autoBatch: { maxBatchSize: 10, maxWaitMs: 50, coalesce: false },
+      });
+
+      // Seed key first
+      await table.set("k1", "initial");
+      await table.flush();
+      expect(await table.get("k1")).toBe("initial");
+
+      // In a single batch: delete k1, then immediately set k1 to "updated"
+      const p1 = table.delete("k1");
+      const p2 = table.set("k1", "updated");
+
+      await Promise.all([p1, p2]);
+
+      // Set happened AFTER delete, so "updated" must be preserved!
+      expect(await table.get("k1")).toBe("updated");
+    });
+
+    it("table.flush() re-throws underlying database errors and never swallows", async () => {
+      const failingBatcher = new WriteBatcher<string>(
+        async () => {
+          throw new Error("Disk full or database crashed");
+        },
+        { maxBatchSize: 10, maxWaitMs: 100 },
+      );
+
+      const pSet = failingBatcher.enqueue({ key: "k1", value: "v1" });
+      const pFlush = failingBatcher.flush();
+
+      await expect(pSet).rejects.toThrow("Disk full or database crashed");
+      await expect(pFlush).rejects.toThrow("Disk full or database crashed");
+    });
+
+    it("concurrent flush() calls maintain barrier and never return early before target persists", async () => {
+      const flushedBatches: string[][] = [];
+      const batcher = new WriteBatcher<string>(
+        async (payload) => {
+          flushedBatches.push(payload.sets.map((s) => String(s.key)));
+          // Simulate slow asynchronous I/O
+          await new Promise((r) => setTimeout(r, 40));
+        },
+        { maxBatchSize: 10, maxWaitMs: 500 },
+      );
+
+      void batcher.enqueue({ key: "k1", value: "v1" });
+      const f1 = batcher.flush();
+
+      // Enqueue k2 while batch 1 is in-flight
+      await new Promise((r) => setTimeout(r, 10));
+      void batcher.enqueue({ key: "k2", value: "v2" });
+
+      let callerXDone = false;
+      let callerYDone = false;
+
+      const callerX = (async () => {
+        await batcher.flush();
+        callerXDone = true;
+      })();
+
+      const callerY = (async () => {
+        await batcher.flush();
+        callerYDone = true;
+      })();
+
+      await Promise.all([f1, callerX, callerY]);
+      expect(callerXDone).toBe(true);
+      expect(callerYDone).toBe(true);
+      expect(flushedBatches).toEqual([["k1"], ["k2"]]);
+    });
+
+    it("resolves double delete on existing key cleanly without returning undefined", async () => {
+      const table = db.table<string>("double_delete_table", {
+        autoBatch: { maxBatchSize: 10, maxWaitMs: 50 },
+      });
+
+      await table.set("item1", "exists");
+      await table.flush();
+
+      const d1 = table.delete("item1");
+      const d2 = table.delete("item1");
+
+      const [r1, r2] = await Promise.all([d1, d2]);
+      expect(typeof r1).toBe("boolean");
+      expect(typeof r2).toBe("boolean");
+      expect(await table.get("item1")).toBeUndefined();
+    });
+
+    it("re-uses Table singletons to eliminate memory leaks and guarantee cross-instance RYW", async () => {
+      // 1. Singleton caching verification
+      const t1 = db.table<string>("cached_users");
+      const t2 = db.table<string>("cached_users");
+      expect(t1).toBe(t2); // Same instance!
+
+      // 2. Cross-caller RYW guarantee
+      void t1.set("user:100", "Alice");
+      // Even without awaiting flush, t2 shares the batcher and reads immediately
+      expect(await t2.get("user:100")).toBe("Alice");
+
+      await t1.flush();
+      expect(await t2.get("user:100")).toBe("Alice");
+    });
+
+    it("reads in-flight snapshot directly without blocking unrelated reads", async () => {
+      const table = db.table<string>("in_flight_reads", {
+        autoBatch: { maxBatchSize: 10, maxWaitMs: 500 },
+      });
+
+      // Write key and trigger slow flush
+      void table.set("active_key", "in_flight_value");
+      expect(await table.get("active_key")).toBe("in_flight_value");
+
+      // Unrelated key reads instantly from storage/undefined without being blocked
+      expect(await table.get("unrelated_key")).toBeUndefined();
+    });
+  });
 });

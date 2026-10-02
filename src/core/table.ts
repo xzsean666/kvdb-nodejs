@@ -75,10 +75,12 @@ export interface TableDependencies {
 
 export class Table<Value = JsonValue, Columns extends Record<string, unknown> = Record<string, unknown>> {
   private readonly writeBatcher?: WriteBatcher<Value>;
+  private readonly autoBatchOptions?: AutoBatchOptions;
 
   constructor(private readonly deps: TableDependencies) {
     const opts = resolveAutoBatchOptions(deps.autoBatch);
     if (opts) {
+      this.autoBatchOptions = opts;
       this.writeBatcher = new WriteBatcher<Value>(
         async (payload) => this.flushBatch(payload),
         opts,
@@ -101,8 +103,47 @@ export class Table<Value = JsonValue, Columns extends Record<string, unknown> = 
   private async flushBatch(payload: BatchFlushPayload<Value>): Promise<BatchFlushResult | void> {
     const schema = await this.schemaDriver();
     const deletedKeys = new Set<string | number>();
+    const isSequential =
+      this.autoBatchOptions?.coalesce === false && Boolean(payload.operations?.length);
 
     if (schema) {
+      if (isSequential) {
+        for (const op of payload.operations) {
+          if (op.type === "set" && op.item) {
+            const rawKeys = op.item.keys;
+            const columns = validateColumnValues(schema.schema, rawKeys);
+            await schema.setRecord(
+              op.item.key,
+              serialize(op.item.value as JsonValue),
+              columns,
+              op.item.ttlMs,
+            );
+            if (this.deps.cache) {
+              await this.deps.cache.set(
+                this.cacheKey(String(op.item.key), true),
+                op.item.value,
+                op.item.ttlMs,
+              );
+            }
+            if (this.deps.hooks.has("afterWrite")) {
+              await this.deps.hooks.run("afterWrite", {
+                namespace: this.namespace,
+                key: String(op.item.key),
+                value: op.item.value as JsonValue,
+                ttlMs: op.item.ttlMs,
+              });
+            }
+          } else if (op.type === "delete") {
+            const ok = await schema.delete(op.key);
+            if (ok) deletedKeys.add(op.key);
+            if (this.deps.cache) {
+              await this.deps.cache.delete(this.cacheKey(String(op.key), true));
+            }
+          }
+        }
+        return { deletedKeys };
+      }
+
       if (payload.sets.length > 0) {
         const recordsToSet = payload.sets.map((item) => {
           const rawKeys = item.keys;
@@ -124,15 +165,13 @@ export class Table<Value = JsonValue, Columns extends Record<string, unknown> = 
         }
 
         if (this.deps.cache) {
-          await Promise.all(
-            payload.sets.map((item) =>
-              this.deps.cache!.set(
-                this.cacheKey(String(item.key), true),
-                item.value,
-                item.ttlMs,
-              ),
-            ),
-          );
+          for (const item of payload.sets) {
+            await this.deps.cache.set(
+              this.cacheKey(String(item.key), true),
+              item.value,
+              item.ttlMs,
+            );
+          }
         }
 
         if (this.deps.hooks.has("afterWrite")) {
@@ -154,11 +193,9 @@ export class Table<Value = JsonValue, Columns extends Record<string, unknown> = 
         }
 
         if (this.deps.cache) {
-          await Promise.all(
-            payload.deletes.map((key) =>
-              this.deps.cache!.delete(this.cacheKey(String(key), true)),
-            ),
-          );
+          for (const key of payload.deletes) {
+            await this.deps.cache.delete(this.cacheKey(String(key), true));
+          }
         }
       }
 
@@ -166,6 +203,33 @@ export class Table<Value = JsonValue, Columns extends Record<string, unknown> = 
     }
 
     const driver = await this.deps.getDriver();
+    if (isSequential) {
+      for (const op of payload.operations) {
+        const pk = toPhysicalKey(this.deps.scope, String(op.key));
+        if (op.type === "set" && op.item) {
+          await driver.set(pk, serialize(op.item.value as JsonValue), op.item.ttlMs);
+          if (this.deps.cache) {
+            await this.deps.cache.set(pk, op.item.value, op.item.ttlMs);
+          }
+          if (this.deps.hooks.has("afterWrite")) {
+            await this.deps.hooks.run("afterWrite", {
+              namespace: this.namespace,
+              key: String(op.item.key),
+              value: op.item.value as JsonValue,
+              ttlMs: op.item.ttlMs,
+            });
+          }
+        } else if (op.type === "delete") {
+          const ok = await driver.delete(pk);
+          if (ok) deletedKeys.add(op.key);
+          if (this.deps.cache) {
+            await this.deps.cache.delete(pk);
+          }
+        }
+      }
+      return { deletedKeys };
+    }
+
     if (payload.sets.length > 0) {
       const entries = payload.sets.map((item) => ({
         key: toPhysicalKey(this.deps.scope, String(item.key)),
@@ -182,15 +246,13 @@ export class Table<Value = JsonValue, Columns extends Record<string, unknown> = 
       }
 
       if (this.deps.cache) {
-        await Promise.all(
-          payload.sets.map((item) =>
-            this.deps.cache!.set(
-              toPhysicalKey(this.deps.scope, String(item.key)),
-              item.value,
-              item.ttlMs,
-            ),
-          ),
-        );
+        for (const item of payload.sets) {
+          await this.deps.cache.set(
+            toPhysicalKey(this.deps.scope, String(item.key)),
+            item.value,
+            item.ttlMs,
+          );
+        }
       }
 
       if (this.deps.hooks.has("afterWrite")) {
@@ -215,9 +277,9 @@ export class Table<Value = JsonValue, Columns extends Record<string, unknown> = 
       }
 
       if (this.deps.cache) {
-        await Promise.all(
-          physicalKeys.map((pk) => this.deps.cache!.delete(pk)),
-        );
+        for (const pk of physicalKeys) {
+          await this.deps.cache.delete(pk);
+        }
       }
     }
 
@@ -353,8 +415,9 @@ export class Table<Value = JsonValue, Columns extends Record<string, unknown> = 
         return written;
       }
 
-      // If a batch flush is in flight, await it first to guarantee snapshot consistency
-      if (this.writeBatcher.isFlushingNow) {
+      // If the target key is currently in flight, wait for that batch to settle
+      const inFlight = this.writeBatcher.getInFlight(key);
+      if (inFlight) {
         await this.writeBatcher.flush();
       }
     }
@@ -447,8 +510,12 @@ export class Table<Value = JsonValue, Columns extends Record<string, unknown> = 
           return deserialize<Value>(serialize(pending.item.value as JsonValue));
         }
       }
-      if (this.writeBatcher.isFlushingNow) {
-        await this.writeBatcher.flush();
+      const inFlight = this.writeBatcher.getInFlight(key);
+      if (inFlight) {
+        if (inFlight.type === "delete") return undefined;
+        if (inFlight.item) {
+          return deserialize<Value>(serialize(inFlight.item.value as JsonValue));
+        }
       }
     }
 
@@ -516,8 +583,9 @@ export class Table<Value = JsonValue, Columns extends Record<string, unknown> = 
       if (pending) {
         return pending.type === "set";
       }
-      if (this.writeBatcher.isFlushingNow) {
-        await this.writeBatcher.flush();
+      const inFlight = this.writeBatcher.getInFlight(key);
+      if (inFlight) {
+        return inFlight.type === "set";
       }
     }
     const schema = await this.schemaDriver();
