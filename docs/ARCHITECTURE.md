@@ -56,12 +56,15 @@ src/
 │   ├── types.ts             # Driver, DriverCapabilities, SchemaTableDriver 核心契约
 │   ├── sqlite/              # SQLite 实现（基于 better-sqlite3，Prepared Statement 缓存与立即事务）
 │   ├── postgres/            # PostgreSQL 实现（基于 pg，行锁升序防死锁、Keyset 分页拉取）
-│   └── mongodb/             # MongoDB 实现（基于 mongodb 驱动，CAS 原子更新与 bulkWrite）
+│   ├── mongodb/             # MongoDB 实现（基于 mongodb 驱动，CAS 原子更新与 bulkWrite）
+│   ├── redis/               # Redis 实现（基于 ioredis，服务端原子 Lua CAS、PX TTL 与 SCAN 游标）
+│   └── mysql/               # MySQL 实现（基于 mysql2，InnoDB 行级排他锁、动态 Schema Table）
 │
-├── query/                   # 统一查询编译器
+├── query/                   # 统一查询编译器与求值引擎
 │   ├── ast.ts               # 跨后端统一抽象语法树节点定义（QueryNode）
 │   ├── parser.ts            # 类 Mongo 过滤语法到 AST 的解析器（白名单转义与原型链防御）
 │   ├── compiler.ts          # AST 到底层原生查询的下降编译器基类/接口
+│   ├── evaluator.ts         # QueryNode AST 纯内存全功能通用求值与排序引擎
 │   └── paths.ts             # JSON 路径与列名引用提取助手
 │
 ├── cache/                   # 独立 Cache 子系统

@@ -17,13 +17,17 @@ import { remainingTtl } from "../core/expiry.js";
 import { KvdbConfigError } from "../core/errors.js";
 
 /** A store, or shorthand spec resolved into one. */
+import { RedisStore } from "./stores/redis-store.js";
+
 export type CacheStoreSpec =
   | KVStore
   | "memory"
   | "sqlite-memory"
+  | "redis"
   | { driver: "memory"; max?: number }
   | { driver: "sqlite-memory"; table?: string }
-  | { driver: "sqlite"; file: string; table?: string };
+  | { driver: "sqlite"; file: string; table?: string }
+  | { driver: "redis"; url?: string; keyPrefix?: string };
 
 export interface CacheOptions {
   /** Ordered tiers, highest priority first. */
@@ -51,6 +55,7 @@ function resolveStore(spec: CacheStoreSpec): KVStore {
   if (isKVStore(spec)) return spec;
   if (spec === "memory") return new MemoryStore();
   if (spec === "sqlite-memory") return new SqliteCacheStore({ file: ":memory:" });
+  if (spec === "redis") return new RedisStore();
   if (typeof spec === "object") {
     switch (spec.driver) {
       case "memory":
@@ -59,6 +64,8 @@ function resolveStore(spec: CacheStoreSpec): KVStore {
         return new SqliteCacheStore({ file: ":memory:", table: spec.table });
       case "sqlite":
         return new SqliteCacheStore({ file: spec.file, table: spec.table });
+      case "redis":
+        return new RedisStore({ url: spec.url, keyPrefix: spec.keyPrefix });
     }
   }
   throw new KvdbConfigError(`Unsupported cache store spec: ${JSON.stringify(spec)}`);
@@ -85,12 +92,13 @@ export class Cache {
     return hit === undefined ? undefined : deserialize<V>(hit.value);
   }
 
-  async set<V>(key: string, value: V, ttlMs?: number): Promise<void> {
+  async set<V>(key: string, value: V, ttlOrOpts?: number | { ttlMs?: number }): Promise<void> {
     if (value === undefined) {
       await this.delete(key);
       return;
     }
     const text = serialize(value);
+    const ttlMs = typeof ttlOrOpts === "number" ? ttlOrOpts : ttlOrOpts?.ttlMs;
     const effectiveTtl = ttlMs ?? this.defaultTtlMs;
     await Promise.all(this.stores.map((store) => store.set(key, text, effectiveTtl)));
   }
@@ -200,5 +208,11 @@ export class Cache {
         this.refreshing.delete(key);
       }
     })();
+  }
+
+  async close(): Promise<void> {
+    await Promise.all(
+      this.stores.map((store) => store.close?.()),
+    );
   }
 }

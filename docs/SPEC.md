@@ -21,7 +21,7 @@
 ### 2.1 KVDB 实例
 ```ts
 const db = new KVDB({
-  driver: "postgresql",        // "sqlite" | "mongodb" | "postgresql"
+  driver: "postgresql",        // "sqlite" | "mongodb" | "postgresql" | "redis" | "mysql"
   url: "postgres://...",       // 连接串(sqlite 用 file 路径)
   tablePrefix: "app_",         // 物理 key/表前缀,默认空
   cache: { driver: "sqlite-memory" }, // 可选,集成缓存
@@ -123,7 +123,7 @@ await cache.get("k");        // miss → undefined
 await cache.delete("k");
 await cache.clear();
 ```
-- 后端:`memory`(lru-cache) / `sqlite-memory` / `sqlite`(file)。
+- 后端:`memory`(lru-cache) / `sqlite-memory` / `sqlite`(file) / `redis`。
 - `wrap(key, fn, { ttlMs, refreshThreshold })`: memoize + stale-while-revalidate，并内置**并发未命中合并保护（In-flight Miss Collapsing）**：对同一冷缓存 Key 的高并发请求自动合并，底层 `fn` 仅执行一次，彻底杜绝缓存击穿与惊群效应（Thundering Herd）。
 
 ### 8.2 集成进 KVDB

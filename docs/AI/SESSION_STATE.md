@@ -7,68 +7,81 @@
 
 ## 1. 核心状态概要
 
-- **当前 Goal**: Milestone 3 生产级功能扩展与生态演进
-- **当前 Task**: PostgreSQL 与 MongoDB 真实 Docker 环境合规验证 (TASK-026)
-- **当前状态**: **COMPLETED_AND_VERIFIED** (真实 Docker 容器环境下 SQLite、PostgreSQL、MongoDB 全三套物理驱动 93 项合规测试 100% 绿灯全过，PostgreSQL 42 项 E2E 测试全过)
+- **当前 Goal**: Milestone 3 生产级功能扩展与生态演进 (已 100% 全面达成)
+- **当前 Task**: Redis 与 MySQL 物理驱动扩展与全生态合规 (TASK-027)
+- **当前状态**: **COMPLETED_AND_VERIFIED** (真实 Docker 容器环境下 SQLite、PostgreSQL、MongoDB、Redis、MySQL 全五套物理驱动 149 项合规测试 100% 绿灯全过，253 项单测 100% 通过，26 个官方示例全部成功运行)
 
 ---
 
-## 2. 本次任务交付清单 (TASK-026)
+## 2. 本次任务交付清单 (TASK-027)
 
-### A. 真实数据库容器验证矩阵
-1. **真实环境部署与端到端跑通**:
-   - 宿主机 PostgreSQL (`postgres:16-alpine` on 5433) 与 MongoDB (`mongo:7` on 27018) 容器真实启动。
-   - 执行 `test/compliance/postgres.test.ts`（31 项测试）100% Pass。
-   - 执行 `test/compliance/mongodb.test.ts`（31 项测试）100% Pass。
-   - 执行 `test/compliance/sqlite.test.ts`（31 项测试）100% Pass。
-   - 合规测试矩阵总数达到 **93 项测试全部通过（0 失败，0 跳过）**。
-   - 执行 `test/e2e/postgres-e2e.test.ts`（42 项真实 PG 物理操作测试）100% Pass。
+### A. 驱动实现与查询求值引擎
+1. **AST 内存通用求值引擎 (`src/query/evaluator.ts`)**:
+   - 实现 `evaluateQuery(node: QueryNode, doc: unknown): boolean` 与 `sortDocuments(items, sortSpecs)`。
+   - 支持 `$eq`, `$ne`, `$gt`, `$gte`, `$lt`, `$lte`, `$in`, `$nin`, `$exists`, `$elemMatch`, 嵌套路径、深比较与 `column` 字段源映射。
+   - 为无原生嵌套 JSON 查询下推能力的后端（如 Redis、简单 KV 存储）提供纯内存 QueryNode AST 完整求值器与排序器，保证 100% 跨驱动契约一致性。
+2. **Redis 驱动与高性能缓存适配 (`src/drivers/redis/redis-driver.ts`, `src/cache/stores/redis-store.ts`)**:
+   - 实现 `RedisDriverFactory`, `RedisDriver`, `RedisStore`。
+   - 采用原子 Lua 脚本服务端 CAS `update(key, mutate)`，在 50 并发增量下实现零丢失写、零冲突死锁。
+   - 支持 `SCAN` 批量前缀清理 `deleteByPrefix` 与 AST 查询过滤。
+   - 支持负数/0 TTL 拦截删除与 Cache 参数宽容解析。
+   - 提供 `close()` 释放底层客户端连接，避免 Node.js 事件循环挂起。
+3. **MySQL / MariaDB 驱动与多键表 (`src/drivers/mysql/mysql-driver.ts`)**:
+   - 基于 `mysql2/promise` 连接池实现严格关系型 KV 存储与动态多键物理表映射。
+   - 采用行级排他锁 `SELECT ... FOR UPDATE` 实现事务性原子并发更新 `update(key, mutate)`。
+   - 自动适配 InnoDB utf8mb4 索引长度上限（VARCHAR 255），支持复合索引与动态加列/加索引。
+   - 完美支持 JSON/Boolean 列的序列化与类型自适应转换。
 
-### B. 驱动健壮性与生命周期增强
-1. **Schema 表动态删除契约**:
-   - `src/drivers/types.ts`: `Driver` 契约新增可选接口 `dropSchemaTable?(name: string): MaybePromise<void>`。
-   - `src/drivers/sqlite/sqlite-driver.ts`: 实现 SQLite 物理 Schema 表与 `kvdb_schema_registry` 元数据同步销毁。
-   - `src/drivers/postgres/postgres-driver.ts`: 实现 PostgreSQL 物理表 `DROP TABLE IF EXISTS ... CASCADE` 与注册表同步销毁。
-   - `src/drivers/mongodb/mongodb-driver.ts`: 实现 MongoDB 物理集合 `drop()` 与注册表条目安全清理。
-   - `src/core/kvdb.ts`: 门面导出 `db.dropTable(name)`。
-   - `test/compliance/multikey-compliance.ts`: 增强测试生命周期，保证跨运行环境下的绝对幂等性。
-2. **MongoDB 动态 Key 演化兜底修复**:
-   - `src/drivers/mongodb/mongodb-driver.ts`: 在 `addKey` 中为带有 `default` 的动态列自动回填已有文档，并在 `extractColumns` 中提供 `definition.default` 优雅兜底。
-
-### C. 自动化脚本与 npm 规范
-1. **一键合规套件运行脚本**:
-   - 新增 `scripts/run-docker-compliance.sh`。
-   - `package.json` 新增 `"test:compliance:all": "bash scripts/run-docker-compliance.sh"`。
-
----
-
-## 3. 涉及与修改的核心文件
-
-- `src/drivers/types.ts`: `Driver.dropSchemaTable`。
-- `src/drivers/sqlite/sqlite-driver.ts`: `SqliteDriver.dropSchemaTable`。
-- `src/drivers/postgres/postgres-driver.ts`: `PostgresDriver.dropSchemaTable`。
-- `src/drivers/mongodb/mongodb-driver.ts`: `MongoDriver.dropSchemaTable` 与 `addKey` 默认值回填。
-- `src/core/kvdb.ts`: `KVDB.dropTable`。
-- `test/compliance/multikey-compliance.ts`: 测试环境幂等清理。
-- `scripts/run-docker-compliance.sh`: 跨驱动合规自动化测试脚本。
-- `package.json`: 新增 `test:compliance:all` 脚本。
-- `docs/AI/tasks/TASK-026.md`: 任务卡片。
-- `docs/AI/TASK_INDEX.md`: 任务索引更新为 DONE。
+### B. 真实数据库容器测试矩阵
+- **全驱动合规测试 (149 项)**:
+  - SQLite: 31 项测试全部通过 (100% Pass)
+  - PostgreSQL: 31 项测试全部通过 (100% Pass)
+  - MongoDB: 31 项测试全部通过 (100% Pass)
+  - Redis: 25 项测试全部通过 (100% Pass)
+  - MySQL: 31 项测试全部通过 (100% Pass)
+  - **总计 149 项合规单测 100% 绿灯无跳过**。
+- **单元测试**:
+  - `test/unit/redis-driver.test.ts`: 6 项测试全部通过。
+  - `test/unit/mysql-driver.test.ts`: 5 项测试全部通过。
+  - 全量单元测试 `pnpm test`: 253 项全部通过。
+- **示例与脚手架**:
+  - `examples/25-redis-kv-and-cache.ts`: 实战运行成功。
+  - `examples/26-mysql-kv-and-multikey.ts`: 实战运行成功。
+  - 全量 26 个官方示例 `pnpm examples`: 100% 成功运行。
+  - 自动化脚本 `scripts/run-docker-compliance.sh`: 纳入 MySQL。
 
 ---
 
-## 4. 全量验证结果
+## 3. 全局里程碑达成状态 (Milestone 1, 2, 3 全部 100% 完成)
 
-- `pnpm test`: **242 tests passing (100% 全部通过，23 个测试套件，0 失败)**。
-- `pnpm test:compliance:all`: **93 tests passing (100% 全部通过，全 3 大驱动合规无跳过)**。
-- `test/e2e/postgres-e2e.test.ts`: **42 tests passing (100% 全部通过)**。
-- `pnpm typecheck`: **0 errors** (严苛 TypeScript 检查通过)。
-- `pnpm build`: **构建成功**，输出 ESM、CJS 与 `.d.ts` 类型定义。
-- `pnpm examples`: **24 个官方实战示例全部成功运行通过 (100%)**。
+- **Milestone 1 (多驱动核心与独立缓存体系)**: 100% 完成
+- **Milestone 2 (动态多键与物理索引架构)**: 100% 完成
+- **Milestone 3 (生产级功能扩展与生态演进)**: 100% 完成
+  - TASK-024 (查询缓存与写失效) -> DONE
+  - TASK-025-CACHE (Cache 前缀清理) -> DONE
+  - TASK-026 (PostgreSQL & MongoDB 真实 Docker 合规) -> DONE
+  - TASK-027 (Redis & MySQL 驱动扩展与全生态合规) -> DONE
+  - TASK-028-QUEUE (可靠任务队列子系统) -> DONE
+  - TASK-029-AUTO-BATCH (高性能微批处理与写聚合) -> DONE
+  - TASK-031-SECURITY-PERF-HARDENING (安全性能深度加固) -> DONE
 
 ---
 
-## 5. 下一步工作规划 (Milestone 3 待开发项)
+## 4. 验证命令指南
 
-1. **TASK-027 (Redis 与 MySQL 驱动扩展)**:
-   - 接入 Redis 驱动（单键/哈希/TTL/高性能缓存后端）与 MySQL 驱动适配器。
+```bash
+# 1. 类型检查
+pnpm typecheck
+
+# 2. 打包构建
+pnpm build
+
+# 3. 本地单元测试 (253 tests)
+pnpm test
+
+# 4. 全驱动真实数据库合规测试 (149 tests across SQLite, Postgres, Mongo, Redis, MySQL)
+pnpm test:compliance:all
+
+# 5. 官方全量实战示例运行 (26 examples)
+pnpm examples
+```

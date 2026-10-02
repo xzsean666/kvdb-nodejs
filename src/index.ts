@@ -26,6 +26,10 @@ export { PostgresDriverFactory } from "./drivers/postgres/postgres-driver.js";
 export type { PostgresDriverOptions } from "./drivers/postgres/postgres-driver.js";
 export { MongoDriverFactory } from "./drivers/mongodb/mongodb-driver.js";
 export type { MongoDriverOptions } from "./drivers/mongodb/mongodb-driver.js";
+export { RedisDriverFactory, RedisDriver } from "./drivers/redis/redis-driver.js";
+export type { RedisDriverOptions } from "./drivers/redis/redis-driver.js";
+export { MysqlDriverFactory, MysqlDriver } from "./drivers/mysql/mysql-driver.js";
+export type { MysqlDriverOptions } from "./drivers/mysql/mysql-driver.js";
 
 // Auto-index manager (used internally; exported for custom integrations).
 export { AutoIndexManager } from "./core/auto-index.js";
@@ -46,6 +50,7 @@ export { MemoryStore } from "./cache/stores/memory-store.js";
 export type { MemoryStoreOptions } from "./cache/stores/memory-store.js";
 export { SqliteCacheStore } from "./cache/stores/sqlite-store.js";
 export type { SqliteStoreOptions } from "./cache/stores/sqlite-store.js";
+export { RedisStore } from "./cache/stores/redis-store.js";
 export type { KVStore, RawEntry, KVEntry } from "./cache/types.js";
 
 // Decorator caching (docs/SPEC.md §9). Requires TC39 standard decorators.

@@ -12,6 +12,8 @@ import type { Driver, DriverFactory } from "../drivers/types.js";
 import { SqliteDriverFactory } from "../drivers/sqlite/sqlite-driver.js";
 import { PostgresDriverFactory } from "../drivers/postgres/postgres-driver.js";
 import { MongoDriverFactory } from "../drivers/mongodb/mongodb-driver.js";
+import { RedisDriverFactory } from "../drivers/redis/redis-driver.js";
+import { MysqlDriverFactory } from "../drivers/mysql/mysql-driver.js";
 import { Cache } from "../cache/cache.js";
 import type { CacheOptions } from "../cache/cache.js";
 import { Table } from "./table.js";
@@ -36,7 +38,7 @@ import type { QueueOptions, WorkerOptions, JobProcessor } from "../queue/types.j
 
 
 /** Driver names accepted in config (mirrors docs/SPEC.md and the README). */
-export type KVDBDriverName = "sqlite" | "postgresql" | "mongodb";
+export type KVDBDriverName = "sqlite" | "postgresql" | "mongodb" | "redis" | "mysql";
 
 export interface KVDBOptions {
   driver: KVDBDriverName;
@@ -289,6 +291,20 @@ function createDriverFactory(options: KVDBOptions): DriverFactory {
       return new MongoDriverFactory({
         url: options.url,
         collection: options.table,
+        indexes: options.indexes,
+      });
+    case "redis":
+      return new RedisDriverFactory({
+        url: options.url,
+        keyPrefix: options.tablePrefix,
+      });
+    case "mysql":
+      if (options.url === undefined) {
+        throw new KvdbConfigError("The MySQL driver requires a connection `url`.");
+      }
+      return new MysqlDriverFactory({
+        url: options.url,
+        table: options.table,
         indexes: options.indexes,
       });
     default: {

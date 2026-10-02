@@ -50,7 +50,7 @@ export interface SchemaTableDriver<Value = JsonValue, Columns extends Record<str
 
 
 
-export type ProviderName = "sqlite" | "postgres" | "mongodb";
+export type ProviderName = "sqlite" | "postgres" | "mongodb" | "redis" | "mysql";
 
 /** The value+TTL an atomic update writes back (see {@link Driver.update}). */
 export interface UpdateResult {
