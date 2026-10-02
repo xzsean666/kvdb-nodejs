@@ -1,358 +1,291 @@
-# ARCHITECTURE.md — KVDB SDK 系统架构(Step 1 产出)
+# ARCHITECTURE.md — KVDB SDK 系统架构总述与技术规格
 
-> 本文件是 Step 1 的强制产出:**只描述架构,不含实现代码**。
-> 所有签名均为"契约示意",用于界定模块边界与数据流,真正实现见 Step 4。
-
----
-
-## 1. 设计目标与约束回顾
-
-| 目标 | 架构含义 |
-|---|---|
-| 极简 API | 三层对象:`KVDB` → `Table` → CRUD/Query,用户只面对少量方法 |
-| 多数据库支持 | 后端走 **Driver 适配器**,核心不感知具体数据库 |
-| 高性能读写 | 同步 SQLite(better-sqlite3)、批量优化、自动索引、低延迟内存缓存 |
-| JSON 存储与查询 | 值统一存为 **canonical text JSON**;查询走 **统一 IR/AST → 每后端下降** |
-| 内置 Cache 系统 | Cache 为**独立模块**,可单用也可集成进 KVDB |
-| 装饰器缓存 | TC39 装饰器,委托给 Cache 的 `wrap()` 引擎 |
-| 易扩展易升级 | Plugin / Hook / Middleware + 能力标志,API 长期稳定 |
-| 完整 TS 支持 | 值形状用 phantom 类型携带,`InferValue` 推导 |
+> 本文件是系统架构与模块契约的统一事实来源（Source of Truth）。
+> 详尽 API 与行为规格见 `docs/SPEC.md`，构建与运行指南见 `docs/BUILD.md`，架构决策记录见 `docs/AI/DECISIONS.md`。
 
 ---
 
-## 2. 关键设计决策(Key Design Decisions)
+## 1. 架构总览
 
-> 这些决策是架构的"宪法",修改需在 `nextsession.md` 记录理由。调研依据见 `docs/EXTERNAL-DOCS.md`。
+KVDB SDK 采用分层与双契约设计：
+- 上层对开发者暴露极简且类型安全的门面 API（`KVDB`、`Table`、`Cache`、`WriteBatcher`、TC39 装饰器）；
+- 下层将纯键值能力（`KVStore`）与高级查询/物理多键能力（`Driver`、`SchemaTableDriver`）严格隔离；
+- 通过统一 AST 实现类 Mongo 风格查询到多数据库原生表达式的精准下降。
 
-### KD-1. 双层契约分离:`KVStore` 与 `Driver` 不合并
-- **最低层 `KVStore`**:Map 超集 + TTL,只有 `get/set/delete/has/clear/*Many/iterator`。用于 Cache 后端,也是 KV 语义的最小公约(借鉴 **keyv**)。
-- **富层 `Driver`**:在 KVStore 之上加 **JSON 查询、prefix、索引、能力标志**(借鉴 **Prisma driver adapter**)。
-- **理由**:把"简单 KV 缓存"和"可查询数据存储"两个职责彻底分开,避免最低公分母陷阱;Cache 不必背负查询能力,Driver 不必背负缓存策略。
-
-### KD-2. 查询用统一 IR/AST,每后端用 visitor 下降
-- 用户写 Mongo 风格查询文档 → `parser` 产出后端无关的 **AST** → 每后端 `compiler` 把 AST 下降为原生查询(SQLite `json_extract`/`->>`,PostgreSQL `jsonb`/`@>`,MongoDB 原生)。
-- **理由**:避免每个驱动各写一套查询翻译;避免 SQL 字符串往返;新增后端只需实现一个 visitor。
-
-### KD-3. 值的规范形态 = text JSON(canonical JSON)
-- 写入时统一序列化为文本 JSON,由各后端自行 ingest;**不**把 Postgres 的二进制 jsonb 运到 SQLite。
-- **理由**:跨后端可移植、序列化逻辑集中在一层(per-backend codec)。
-
-### KD-4. Cache 用分层 stores 模型
-- `Cache({ stores: [memory, sqliteMemory, sqliteFile] })`,写入各层、读取从最高优先级命中(借鉴 **cache-manager v7**)。
-- 提供 `wrap(key, fn, { ttl, refreshThreshold })`,支持 stale-while-revalidate。
-- **理由**:装饰器、查询缓存、热数据缓存全部复用同一引擎。
-
-### KD-5. TC39 标准装饰器(TS 5.x 原生)
-- 不用 legacy `experimentalDecorators`(签名不兼容,正在淘汰)。
-- key 默认 = `构造函数名 + 方法名 + stableSerialize(args)`,提供 `CacheKeyBuilder` 覆盖与 `CacheableKey` 逃生接口。
-
-### KD-6. 永不自己实现连接池;能力标志允许后端退出关系型假设
-- 池属于底层 driver,透传其配置。MongoDB 用连接串内部池,可声明 `managesOwnPool: true`。
-- 能力标志(`nativeTtl` / `jsonQuery` / `supportsTransactions` …)让核心据此选择委托原生还是 fallback 模拟。
-
-### KD-7. 约定:`undefined` 不存储
-- `set(key, undefined)` 等价于 `delete`;cache miss 返回 `undefined`(对齐 lru-cache / cache-manager v7 约定)。
-
-### KD-8. 最高价值实践:跨后端合规测试套件(不 mock DB)
-- 一套适配器合规测试,**每个后端都必须跑通真实数据库**。这是防止抽象泄漏的核心手段。
+```text
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                            Public Facade API                                │
+│   KVDB  │  Table<Value, Keys>  │  Cache  │  @Cacheable  │  WriteBatcher     │
+└──────────────┬───────────────────────────────────────────────┬──────────────┘
+               │                                               │
+┌──────────────▼──────────────┐                 ┌──────────────▼──────────────┐
+│        Rich Driver Layer    │                 │     Minimum KVStore Layer   │
+│   (Query, Multi-Key Schema, │                 │ (Get/Set/Del/TTL/Iterator,  │
+│    DDL, Secondary Indexing, │                 │  Multi-tier Cache Stores)   │
+│    Auto-Batch, Atomic Update)                 │                             │
+└──────────────┬──────────────┘                 └──────────────┬──────────────┘
+               │                                               │
+┌──────────────▼───────────────────────────────────────────────▼──────────────┐
+│                            Database Drivers                                 │
+│          better-sqlite3    │    pg (PostgreSQL)    │    mongodb             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
 
 ---
 
-## 3. 模块分解(认知驱动拆分)
+## 2. 模块结构与认知边界 (Cognitive Directory Map)
 
-> 拆分依据:**每个目录/文件能否被 AI 孤立理解**。每个模块标注 职责 / 输入 / 输出 / 依赖。
+模块严格遵循**认知驱动拆分**（AI 能否孤立理解），各层职责与输入输出高度内聚：
 
 ```text
 src/
-  index.ts                 # 唯一公开入口:导出 KVDB / Cache / 装饰器 / 公开类型
-
-  core/                    # 用户面对的对象层(不感知具体数据库)
-    kvdb.ts                # KVDB 实例:连接、driver 管理、prefix、cache 配置
-    table.ts               # Table/Namespace 实例:CRUD + Query 的门面
-    table-schema.ts        # 物理列/索引 schema 类型与运行时校验
-    table-registry.ts      # 逻辑 table 到物理 table/collection 的注册
-    serializer.ts          # canonical JSON text 编解码(KD-3)
-    key.ts                 # prefix / namespace key 解析(集中在此一层)
-    errors.ts              # 错误类型(显式、可判别)
-
-  drivers/                 # 富层 Driver 契约 + 各后端实现
-    types.ts               # Driver / DriverFactory / Capabilities 契约(KD-1, KD-6)
-    schema-types.ts        # 物理列、完整记录与迁移契约
-    sqlite/                # better-sqlite3 实现(+ node:sqlite 版本门控适配)
-    postgres/              # pg / jsonb 实现
-    mongodb/               # mongodb 原生实现
-
-  query/                   # 统一查询编译器(KD-2)
-    ast.ts                 # 查询 IR/AST 节点类型(后端无关)
-    parser.ts              # Mongo 风格查询文档 -> AST
-    compiler.ts            # AST -> 后端原生(visitor 接口)
-    operators.ts           # 操作符表($eq/$gt/$in/$exists/…)
-
-  cache/                   # 独立 Cache 子系统(KD-4)
-    cache.ts               # Cache 门面:分层 stores、wrap()
-    types.ts               # KVStore 契约(最低层,KD-1)
-    stores/
-      memory-store.ts      # lru-cache v11
-      sqlite-memory-store.ts
-      sqlite-file-store.ts
-
-  decorators/              # 装饰器缓存(KD-5)
-    cacheable.ts           # @Cacheable —— 委托 cache.wrap()
-    cache-clear.ts         # @CacheClear
-    cache-key.ts           # 参数 -> 稳定 key 生成
-
-  plugins/                 # 扩展系统
-    types.ts               # Plugin / Hook / Middleware 契约
-    runtime.ts             # 生命周期钩子的注册与触发
-
-  types/
-    index.ts               # 公开类型 + 推导工具(InferValue 等)
-
-test/
-  compliance/              # 跨后端合规套件(KD-8),对真实 DB 运行
+├── index.ts                 # 唯一公开入口：导出 KVDB / Table / Cache / 装饰器 / Batcher / 公开类型
+│
+├── core/                    # 核心门面与业务逻辑（无具体数据库原生驱动调用）
+│   ├── kvdb.ts              # KVDB 主实例：管理驱动生命周期、Table 单例缓存、TTL 清理
+│   ├── table.ts             # Table 门面：CRUD、点查、多键检索、批处理打通、RYW 读己之写拦截
+│   ├── table-schema.ts      # 物理列/多键定义、类型检查、动态演进校验、保留字保护
+│   ├── batcher.ts           # WriteBatcher 微批聚合引擎：同 Key 折叠、操作保序、主键排序防死锁
+│   ├── key.ts               # 前缀、命名空间与用户 key 的组合与解析
+│   ├── serializer.ts        # Canonical JSON 稳定键排序序列化与反序列化（GC 优化）
+│   ├── errors.ts            # 分级、可判别的错误类型体系（KvdbError 及其子类）
+│   ├── expiry.ts            # TTL 计算与相对/绝对时间换算助手
+│   └── auto-index.ts        # 查询模式分析器与自动索引建议引擎（容量上限与防抖保护）
+│
+├── drivers/                 # 底层驱动适配层
+│   ├── types.ts             # Driver, DriverCapabilities, SchemaTableDriver 核心契约
+│   ├── sqlite/              # SQLite 实现（基于 better-sqlite3，Prepared Statement 缓存与立即事务）
+│   ├── postgres/            # PostgreSQL 实现（基于 pg，行锁升序防死锁、Keyset 分页拉取）
+│   └── mongodb/             # MongoDB 实现（基于 mongodb 驱动，CAS 原子更新与 bulkWrite）
+│
+├── query/                   # 统一查询编译器
+│   ├── ast.ts               # 跨后端统一抽象语法树节点定义（QueryNode）
+│   ├── parser.ts            # 类 Mongo 过滤语法到 AST 的解析器（白名单转义与原型链防御）
+│   ├── compiler.ts          # AST 到底层原生查询的下降编译器基类/接口
+│   └── paths.ts             # JSON 路径与列名引用提取助手
+│
+├── cache/                   # 独立 Cache 子系统
+│   ├── cache.ts             # Cache 门面：分层存储查找、SWR wrap()、并发未命中合并
+│   ├── types.ts             # KVStore 最小公约契约
+│   └── stores/              # 各层 Store 实现（MemoryStore, SqliteStore 等）
+│
+├── decorators/              # TC39 标准装饰器（TypeScript 5.x 原生）
+│   ├── cacheable.ts         # @Cacheable / @CacheClear 装饰器工厂
+│   └── cache-key.ts         # 稳定参数哈希与 Cache Key 构造逻辑
+│
+├── plugins/                 # 插件与生命周期钩子系统
+│   ├── types.ts             # Hook 签名与插件上下文定义
+│   └── runtime.ts           # 读写查生命周期的洋葱模型运行时（零开销快速路径）
+│
+└── types/                   # 全局通用类型定义（JsonValue, MaybePromise 等）
 ```
 
-### 模块定义表
+### 核心模块职责表
 
-| 模块 | 职责(一件事) | 输入 | 输出 | 依赖 |
+| 模块 | 职责 (一件事) | 输入 | 输出 | 关键依赖 |
 |---|---|---|---|---|
-| `core/kvdb.ts` | 管理一个数据库实例的生命周期与配置 | `KVDBOptions` | `KVDB` 实例,可生成 `Table` | `drivers/types`, `cache/cache`, `core/key` |
-| `core/table.ts` | 在某 namespace 下提供 CRUD/Query 门面 | namespace 名 | CRUD/Query 方法 | `drivers/types`, `query/*`, `core/serializer` |
-| `core/serializer.ts` | 值 ↔ canonical text JSON | 任意 JSON 值 | 字符串 / 还原值 | 无 |
-| `drivers/types.ts` | 定义 Driver 契约与能力标志 | — | 类型 | 无 |
-| `drivers/<backend>` | 把契约落到具体数据库 | SQL/驱动调用 | 行/文档 | 对应 npm 驱动 |
-| `query/parser.ts` | 查询文档 → AST | 查询对象 | AST | `query/ast` |
-| `query/compiler.ts` | AST → 后端查询 | AST + 后端 visitor | 原生查询/参数 | `query/ast`, `query/operators` |
-| `cache/cache.ts` | 分层缓存 + wrap | `CacheOptions` | get/set/wrap | `cache/types`, `cache/stores/*` |
-| `cache/stores/*` | 单一存储后端实现 KVStore | KVStore 调用 | 值 | lru-cache / better-sqlite3 |
-| `decorators/cacheable.ts` | 缓存方法结果 | 装饰器选项 | 包装后的方法 | `cache/cache`, `decorators/cache-key` |
-| `plugins/runtime.ts` | 注册/触发生命周期钩子 | Plugin | 钩子调用 | `plugins/types` |
+| `core/kvdb.ts` | 数据库实例生命周期、Table 单例缓存复用、全局资源优雅停机 | `KVDBOptions` | `KVDB` 实例 | `drivers/types`, `cache/cache`, `core/table` |
+| `core/table.ts` | 表命名空间 CRUD、点查、多键检索、微批写入排空、RYW 拦截 | key, value, query | CRUD 操作结果 | `drivers/types`, `core/batcher`, `query/*` |
+| `core/batcher.ts` | 内存微批合并、同 Key 覆盖写/写删抵消、主键升序排序防死锁 | 写入/删除请求 | 聚合后统一批次 | `core/table-schema` |
+| `core/table-schema.ts`| 动态多键契约、列类型约束、联合索引元数据校验 | `MultiKeySchema` | 校验后元数据 | `core/errors` |
+| `core/serializer.ts` | 值 ↔ Canonical Text JSON，消除歧义并减轻 GC 堆分配 | 任意 JSON 值 | 规范字符串 / 反序列化对象 | 无 |
+| `drivers/types.ts` | 定义 Driver / SchemaTableDriver / Capabilities 契约 | — | 接口与类型声明 | `cache/types`, `query/ast` |
+| `query/parser.ts` | 声明式 Mongo 查询对象 → 后端无关的 AST | 查询文档 | `QueryNode` AST | `query/ast` |
+| `cache/cache.ts` | 多层缓存透明穿透、SWR 异步续期、并发防击穿合并 | `CacheOptions` | `Cache` 门面实例 | `cache/types`, `cache/stores/*` |
+| `decorators/cacheable.ts`| 声明式方法级缓存（TC39 标准） | 缓存配置 | 包装后方法 | `cache/cache`, `decorators/cache-key` |
+| `plugins/runtime.ts` | 拦截读写查生命周期钩子（洋葱模型） | Hook 定义 | 拦截执行管线 | `plugins/types` |
 
 ---
 
-## 4. 数据流(Data Flow)
+## 3. 核心契约与接口
 
-### 4.1 写入路径 `users.set("u1", { profile: { age: 20 } })`
-```text
-Table.set(key, value)
-  → core/key:        解析为带 prefix/namespace 的物理 key
-  → core/serializer: value → canonical text JSON
-  → plugins/runtime: 触发 beforeWrite 钩子(可改写)
-  → Driver.set(physicalKey, jsonText, ttl?)
-        ├─ 后端原生 TTL?  → 交给后端(KD-6 能力标志)
-        └─ 无原生 TTL?    → 存 { value, expires } 由 SDK 包装
-  → plugins/runtime: 触发 afterWrite 钩子
-  → (若配置了 cache 且为写穿策略) 失效/更新相关 cache key
-```
-
-### 4.2 查询路径 `users.find({ where: { "profile.age": { $gt: 18 } } })`
-```text
-Table.find(queryDoc)
-  → query/parser:   queryDoc → AST
-  → (可选) cache:    以 AST 的稳定哈希为 key 查 Query Cache
-  → query/compiler: AST + 当前后端 visitor → 原生查询
-        ├─ SQLite:   json_extract(value,'$.profile.age') > 18  (+ 表达式索引)
-        ├─ Postgres: ((value->>'profile')::jsonb->>'age')::numeric > 18 / jsonb 路径
-        └─ MongoDB:  { "profile.age": { $gt: 18 } } 原生
-  → Driver 执行 → 行/文档
-  → core/serializer: text JSON → 还原值
-  → (可选) 写入 Query Cache
-  → 返回结果
-```
-
-### 4.3 装饰器缓存路径 `@Cacheable() async getUser(id)`
-```text
-调用 getUser(id)
-  → decorators/cache-key: (类名 + 方法名 + stableSerialize([id])) → key
-  → cache.wrap(key, () => 原方法(id), { ttl, refreshThreshold })
-        ├─ 命中且未过期        → 返回缓存值
-        ├─ 命中但低于刷新阈值  → 返回旧值 + 异步刷新(SWR)
-        └─ 未命中              → 执行原方法 → 写各层 store → 返回
-```
-
-### 4.4 三层对象关系
-```text
-KVDB 实例  (连接 / driver / prefix / cache 配置)
-    │  db.table("users")
-    ▼
-Table / Namespace 实例  (业务隔离 / 独立缓存策略)
-    │
-    ▼
-CRUD / Query  (set/get/delete/find/getByPrefix/...)
-```
-
-### 4.5 Schema table 生命周期与查询数据流
-
-`db.table(name, { schema })` 只声明配置；首次实际操作时通过 registry 查找逻辑名：
-
-```text
-Table operation
-  → registry: load metadata by logical name
-      ├─ absent + schema → create physical table/collection + indexes
-      ├─ present + matching schema → open existing physical table/collection
-      ├─ present + no schema → recover stored schema
-      └─ conflict → schema/config error (never implicit ALTER)
-  → schema-aware driver CRUD (fixed fields + physical columns + value JSON)
-```
-
-普通 KV namespace 继续使用共享物理存储；schema table 使用独立物理 table/collection，二者不能静默互转。`where.columns` 编译为物理列节点，`where.value` 及旧 dotted path 编译为 `value` JSON 节点；列名只能来自已加载 schema 白名单。
-
----
-
-## 5. 核心契约示意(仅签名,非实现)
-
-> 放在此处是为了**界定边界**。实现时这些会落到 `src/**/types.ts`。
-
-### 5.1 最低层 `KVStore`(Cache 后端 + KV 语义最小公约,KD-1)
+### 3.1 `KVStore` (最低层契约，`src/cache/types.ts`)
 ```ts
-interface KVStore {
+export interface KVStore {
   get(key: string): MaybePromise<RawEntry | undefined>;
   set(key: string, value: RawEntry, ttlMs?: number): MaybePromise<void>;
   delete(key: string): MaybePromise<boolean>;
   has(key: string): MaybePromise<boolean>;
   clear(): MaybePromise<void>;
-  // 批量(可选,缺失时由核心循环回退)
   getMany?(keys: string[]): MaybePromise<(RawEntry | undefined)[]>;
   setMany?(entries: KVEntry[]): MaybePromise<void>;
   deleteMany?(keys: string[]): MaybePromise<number>;
-  iterator?(prefix?: string): AsyncGenerator<[string, RawEntry]>;
+  iterator?(prefix?: string): AsyncIterable<[string, RawEntry]>;
 }
 ```
 
-### 5.2 富层 `Driver` + 能力标志(KD-1, KD-6)
+### 3.2 `Driver` (富层持久化驱动契约，`src/drivers/types.ts`)
 ```ts
-interface DriverCapabilities {
-  nativeTtl: boolean;
-  jsonQuery: "sqlite-json" | "pg-jsonb" | "mongo" | "none";
-  managesOwnPool: boolean;
-  supportsTransactions: boolean;
-  supportsPrefixScan: boolean;
-}
-
-interface DriverFactory {
+export interface Driver extends KVStore {
   readonly provider: "sqlite" | "postgres" | "mongodb";
   readonly capabilities: DriverCapabilities;
-  connect(): Promise<Driver>;          // 延迟建连(借鉴 Prisma factory)
-}
 
-interface Driver extends KVStore {
   getByPrefix(prefix: string): MaybePromise<KVEntry[]>;
   deleteByPrefix(prefix: string): MaybePromise<number>;
-  find(ast: QueryNode, options?: FindOptions): MaybePromise<KVEntry[]>;
+  find(where: QueryNode, options?: FindOptions, keyPrefix?: string): MaybePromise<KVEntry[]>;
   ensureIndex(jsonPath: string): MaybePromise<void>;
-  raw(): unknown;                      // 原生句柄逃生通道(避免最低公分母陷阱)
+  update?(key: string, mutate: UpdateMutator): MaybePromise<void>;
+  purgeExpired(): MaybePromise<number>;
+  openSchemaTable?<Columns extends Record<string, unknown>>(
+    name: string,
+    schema?: TableSchema<Columns> | MultiKeySchema<Columns>,
+  ): MaybePromise<SchemaTableDriver<JsonValue, Columns> | undefined>;
+  raw(): unknown;
   close(): Promise<void>;
 }
 ```
 
-### 5.3 查询 AST(后端无关,KD-2)
+### 3.3 `SchemaTableDriver` (物理多键表契约，`src/drivers/types.ts`)
 ```ts
-type QueryNode =
-  | { kind: "and" | "or" | "nor"; children: QueryNode[] }
-  | { kind: "not"; child: QueryNode }
-  | { kind: "cmp"; op: CompareOp; path: FieldPath; value: Json }
-  | { kind: "exists"; path: FieldPath; value: boolean }
-  | { kind: "elemMatch"; path: FieldPath; child: QueryNode };
-
-type FieldPath = { segments: (string | { index: number })[] };
-type CompareOp = "$eq" | "$ne" | "$gt" | "$gte" | "$lt" | "$lte" | "$in" | "$nin";
-
-interface BackendVisitor {              // 每后端实现一个
-  renderPath(path: FieldPath): string;  // a.b.c → '$.a.b.c' / '{a,b,c}'
-  renderCompare(op: CompareOp, pathSql: string, value: Json): CompiledFragment;
-  coerce(value: Json): unknown;         // 数值比较的类型强转
+export interface SchemaTableDriver<Value = JsonValue, Columns extends Record<string, unknown> = Record<string, unknown>> {
+  schema: TableSchema<Columns>;
+  setRecord(key: string | number, value: string, columns: Record<string, unknown>, ttlMs?: number): MaybePromise<void>;
+  getRecord(key: string | number): MaybePromise<{ key: string | number; value: string; columns: Record<string, unknown>; expiresAt?: number } | undefined>;
+  getRecordByKey?(keyName: string, keyValue: unknown): MaybePromise<{ key: string | number; value: string; columns: Record<string, unknown>; expiresAt?: number } | undefined>;
+  updateRecord?(
+    key: string | number,
+    mutate: (current: { key: string | number; value: string; columns: Record<string, unknown>; expiresAt?: number } | undefined) => UpdateResult,
+  ): MaybePromise<void>;
+  delete(key: string | number): MaybePromise<boolean>;
+  clear(): MaybePromise<void>;
+  find(where: QueryNode, options?: FindOptions): MaybePromise<Array<{ key: string | number; value: string; columns: Record<string, unknown> }>>;
+  setRecords?(items: Array<{ key: string | number; value: string; columns: Record<string, unknown>; ttlMs?: number }>): MaybePromise<void>;
+  deleteRecords?(keys: (string | number)[]): MaybePromise<number>;
+  addKey?(name: string, definition: KeyDefinition): MaybePromise<void>;
+  addIndex?(definition: TableIndexDefinition | MultiKeyIndexDefinition): MaybePromise<void>;
 }
 ```
 
-### 5.4 Cache 门面(KD-4)
-```ts
-interface CacheOptions { stores: KVStore[]; defaultTtlMs?: number; }
+---
 
-interface Cache {
-  get<V>(key: string): Promise<V | undefined>;
-  set<V>(key: string, value: V, ttlMs?: number): Promise<void>;
-  delete(key: string): Promise<boolean>;
-  clear(): Promise<void>;
-  wrap<V>(key: string, fn: () => Promise<V>,
-          opts?: { ttlMs?: number; refreshThreshold?: number }): Promise<V>;
-}
+## 4. 关键数据流 (Data Flows)
+
+### 4.1 普通 KV 写入与读取
+1. **写入 (`set`)**：
+   - 触发插件 `beforeWrite` 钩子。
+   - `core/serializer.ts` 将值规范化为 Canonical Text JSON。
+   - `core/key.ts` 组装物理 key（`<tablePrefix><namespace>:<userKey>`）。
+   - Auto Batch 缓冲或直接写入驱动；若配置了关联 Cache，同步失效/更新缓存。
+   - 触发 `afterWrite` 钩子。
+2. **读取 (`get`)**：
+   - Auto Batch 内存直通检查（In-Memory Fast-Path，0-RTT 命中最新写入）。
+   - 优先查关联 Cache（如有），命中则直接返回。
+   - 穿透查底座 Driver，若过期则返回 `undefined` 并异步清理；有效则反序列化并回填 Cache。
+
+### 4.2 动态多键（Multi-Key）物理表数据流
+1. **表初始化/打开**：
+   - 声明 `MultiKeySchema`（主键名/类型、二级检索键、联合索引）。
+   - 驱动校验 `kvdb_schema_registry` 表：不存在则执行 DDL 创建物理表与 B-Tree 索引；已存在则严格校验一致性。
+2. **多键写入与点查 (`set` / `getBy`)**：
+   - 物理检索列作为首选数据库列直接持久化；业务复杂对象作为 `value` JSON 载荷存储。
+   - `getBy(keyName, val)` 直接命中物理 B-Tree 索引，复杂度为 $O(1) \sim O(\log N)$，完全避免深层 JSON 扫描。
+3. **动态加键 (`addKey`)**：
+   - 运行时调用 `table.addKey("status", { type: "string", index: true })`。
+   - 驱动执行安全的 DDL 演进（如 `ALTER TABLE ADD COLUMN`）并幂等建立索引，无缝兼容存量记录。
+
+### 4.3 统一 JSON 查询编译流
+```text
+Table.find({ where: { status: "active", "profile.age": { $gt: 18 } } })
+  → query/parser:   白名单校验、操作符语法检查 → 生成统一 QueryNode AST
+  → (可选) cache:    以 AST 稳定哈希为 key 查 Query Cache
+  → query/compiler: AST + 目标数据库 Visitor → 原生表达式
+        ├─ SQLite:      "status" = ? AND json_extract("value", '$.profile.age') > ?
+        ├─ PostgreSQL:  "status" = $1 AND ((value->>'profile')::jsonb->>'age')::numeric > $2
+        └─ MongoDB:     { status: "active", "profile.age": { $gt: 18 } }
+  → Driver 执行 → 行/文档流
+  → core/serializer: 反序列化并组装返回
 ```
 
-### 5.5 插件 / 钩子(扩展系统)
-```ts
-type HookName =
-  | "beforeWrite" | "afterWrite"
-  | "beforeRead"  | "afterRead"
-  | "beforeQuery" | "afterQuery";
-
-interface Plugin {
-  name: string;
-  setup(context: PluginContext): void;   // 注册钩子 / 中间件 / 自定义 driver / cache driver
-}
+### 4.4 Auto Batch 微批合并与写聚合流水线
+```text
+高频并发调用 table.set() / table.delete()
+  │
+  ├─ 内存折叠 (coalesce: true)
+  │    ├─ 同 Key 覆盖写与写删抵消
+  │    └─ Multi-Key 增量浅合并 ({ ...oldKeys, ...newKeys })
+  │
+  ├─ 读己之写保障 (RYW)
+  │    ├─ table.get(k): 内存直通读取 pending 与 inFlightSnapshot (0-RTT)
+  │    └─ table.find(): 触发并发 Flush 屏障确保数据落盘后查询
+  │
+  └─ 触发落盘 (达到 maxBatchSize 或 maxWaitMs 超时)
+       ├─ 主键严格确定性排序 (消除 Postgres/SQLite 交叉行锁死锁)
+       ├─ 批量执行 (SQLite 事务批插入 / PG UNNEST 聚合 / Mongo bulkWrite)
+       └─ Sequence/Generation 屏障唤醒所有等待者并透传异常
 ```
-
-### 5.6 任务队列系统架构 (Queue Subsystem)
-
-Queue 是架构在物理 Schema Table 之上的生产级任务调度层。
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                       Queue Client                          │
-│        push() / pushMany() / pop() / ack() / nack()         │
-└──────────────────────────────┬──────────────────────────────┘
-                               │
-               ┌───────────────┴───────────────┐
-               ▼                               ▼
-┌──────────────────────────────┐ ┌──────────────────────────────┐
-│       Worker Runner          │ │       Visibility Reaper      │
-│  - Concurrency Slot Loop     │ │  - Active lease expiration   │
-│  - Backoff Retry Scheduler   │ │  - Auto recovery & failover  │
-│  - Auto-Heartbeat Extender   │ │  - Dead-Letter Transition    │
-└──────────────┬───────────────┘ └──────────────┬───────────────┘
-               │                                │
-               └───────────────┬────────────────┘
-                               ▼
-┌─────────────────────────────────────────────────────────────┐
-│                 Underlying Schema Table                     │
-│  - table: "_kvdb_queue_<queueName>"                         │
-│  - columns: [queue, state, priority, available_at, dedup]   │
-│  - composite B-Tree index: [queue, state, available_at]     │
-│  - Table.update() atomic row locking (SQLite / PG / Mongo)  │
-└─────────────────────────────────────────────────────────────┘
-```
-
-#### 关键技术实现
-1. **物理存储映射**：每个队列实例对应物理表 `_kvdb_queue_<name>`，利用 `primaryKey: { name: "id" }`，二级检索物理列 `state`、`priority`、`available_at`、`dedup_key` 以及复合 B-Tree 索引 `[state, available_at, priority]`。
-2. **原子租约（Atomic Pop & Lock）**：通过复合索引极速索引扫描就绪任务候选 ID，并通过 `Table.update` 物理排他锁原子验证并变更为 `active`，发放 `lockToken`。
-3. **状态机与重试管道**：
-   - 消费成功：`ack(id, token)` -> `state: "completed"`。
-   - 消费抛错：`nack(id, token, err)` -> 若 `attempts < maxAttempts` 计算退避毫秒，更新 `available_at = now + delayMs`，置为 `delayed`；若超限，转入 `failed` 死信。
-   - 进程异常崩溃：可见性超时机制（Visibility Timeout）保证其他 Worker 在 `available_at` 超期后自动接管。
 
 ---
 
-## 6. 性能策略(映射到模块)
+## 5. 并发、事务与死锁防护模型
 
-| 目标 | 落点 |
-|---|---|
-| 高吞吐读写 | SQLite 用同步 better-sqlite3;批量走 `*Many`;重活下放 worker thread |
-| 快速 JSON 查询 | AST→原生 + 热路径自动生成表达式索引(`ensureIndex`) |
-| 批量优化 | Driver 实现原生批量,缺失时核心回退循环 |
-| 低延迟缓存 | lru-cache v11 内存层 + 分层命中 + SWR |
-| 自动索引 | 记录高频 JSON path,达到阈值时建表达式/GIN 索引 |
-
----
-
-## 7. 可扩展性如何保证 API 稳定
-
-- **新增后端**:实现 `DriverFactory` + 一个 `BackendVisitor`,跑通合规套件即可,核心零改动。
-- **自定义 Cache 后端**:实现 `KVStore` 即可塞进 `stores: [...]`。
-- **行为扩展**:通过 Plugin 注册 Hook/Middleware,不改核心。
-- **能力演进**:新能力先加 `capabilities` 标志,旧后端声明不支持即可,API 不破坏。
+1. **SQLite 驱动**：
+   - 开启 `WAL` 模式（Write-Ahead Logging），读写互不阻塞。
+   - 写入与更新采用 `BEGIN IMMEDIATE` 事务，防止从延迟读取升级到写入事务时发生 `SQLITE_BUSY` 冲突。
+   - 热点 CRUD 与二级键点查采用 Prepared Statement 预编译语句缓存，DDL 扩展时安全失效。
+2. **PostgreSQL 驱动**：
+   - **单调升序排序防死锁**：在将多行批次下发给数据库（`setRecords` / `setMany`）前，对待写主键进行严格确定性升序排序，使所有并发事务获取行锁的顺序永远单调一致，数学上彻底根除 `deadlock detected`。
+   - **Keyset 游标分块**：`iterator` 采用基于主键索引的 Keyset 分页，杜绝一次性加载整表导致的 Node.js 内存爆炸。
+3. **MongoDB 驱动**：
+   - 读写改原子更新基于 CAS / 版本比较机制，批量写入采用 `bulkWrite(ordered: false)` 充分压榨连接利用率。
 
 ---
 
-## 8. 下一步
+## 6. 缓存架构与分层策略
 
-架构已定。Step 2 的 `SPEC.md` / `BUILD.md` 与 Step 3 的 `nextsession.md` 已产出。
-进入 Step 4(实现)前需用户批准,建议的实现顺序见 `docs/nextsession.md`。
+Cache 子系统（`src/cache/`）完全独立于 KVDB，采用分层 Stores 架构：
+
+```text
+       ┌────────────────────────────────────────────────────────┐
+       │                 Cache.get(key) / wrap(key)             │
+       └───────────────────────────┬────────────────────────────┘
+                                   │
+                                   ▼
+┌───────────────────┐    Miss    ┌───────────────────┐    Miss    ┌───────────────────┐
+│ L1: MemoryStore   ├───────────►│ L2: SqliteMemory  ├───────────►│ L3: SqliteFile    │
+│ (lru-cache v11)   │            │ (:memory:)        │            │ (data.cache.db)   │
+└─────────┬─────────┘            └─────────┬─────────┘            └─────────┬─────────┘
+          │ Hit                            │ Hit                            │ Hit
+          └─────────────────┬──────────────┴────────────────────────────────┘
+                            ▼
+           反序列化返回，并自动向更高层 Store 回填数据
+```
+
+- **并发未命中合并 (In-Flight Miss Collapsing)**：对同一未命中 Key 的并发请求复用同一个在途 Promise，彻底消除缓存击穿与惊群效应（Thundering Herd）。
+- **Stale-While-Revalidate (SWR)**：通过 `wrap(key, fn, { ttlMs, refreshThreshold })` 在命中过期边缘数据时先返回旧值，后台异步重新计算并刷新缓存。
+
+---
+
+## 7. 错误处理体系
+
+所有系统抛出错误均派生自 `KvdbError`，提供类型安全的分级判别：
+
+```text
+KvdbError
+├── KvdbConnectionError      # 数据库连接断开、连接超时或凭证失效
+├── KvdbTimeoutError         # 操作超出用户指定的 timeoutMs
+├── KvdbKeyError             # 非法 Key 命名（如包含未转义冒号或非法字符）
+├── KvdbQueryError           # 查询操作符语法错误、未受支持的操作符
+├── KvdbSchemaError          # 列类型不匹配、缺少非空字段默认值、非法多键定义
+├── KvdbConfigError          # Schema 冲突、表降级违规、配置互斥
+├── KvdbUnsupportedError     # 底层后端不支持某操作（capabilities 不满足）
+├── KvdbTransactionError     # 事务冲突、序列化回滚失败
+└── KvdbQueueError           # 队列操作错误（锁租约丢失、超限死信等）
+```
+
+---
+
+## 8. 架构决策索引 (Architecture Decisions)
+
+所有系统架构宪法与设计决策详见 `docs/AI/DECISIONS.md`，核心包含：
+- **基础决策**: KD-1 (双层契约分离), KD-2 (AST 下降), KD-3 (Canonical JSON), KD-4 (分层 Cache), KD-5 (TC39 装饰器), KD-6 (连接池透传与能力标志), KD-7 (`undefined` 语义), KD-8 (真实 DB 合规套件)。
+- **物理 Schema 决策**: KD-P1 ~ KD-P7 (物理表隔离、自动恢复、跨后端类型映射、多键与原生索引优先、动态 DDL 演进)。
+- **安全与性能加固**: KD-SEC1 ~ KD-SEC2 (ANSI 转义、原型链安全), KD-PERF1 ~ KD-PERF3 (语句预编译缓存、批量契约、GC 优化)。
+- **微批与写聚合**: KD-BATCH1 ~ KD-BATCH5 (正交双层配置、确定性主键排序防死锁、RYW 内存直通、保序流水线与屏障锁、Table 单例治理)。
+
+---
+
+## 9. 可扩展性与平滑升级指南
+
+- **添加新后端驱动**: 仅需实现 `Driver` 契约并提供对应的 `AST Visitor`，通过跨驱动合规测试套件（`test/compliance/`）即可无缝接入，核心 Core 零改动。
+- **自定义 Cache 存储**: 仅需实现 `KVStore` 契约即可插入分层缓存的任意优先级位置。
+- **行为扩展**: 通过洋葱模型 Plugin 注册生命周期钩子（`beforeWrite`, `afterRead` 等），在零改动核心的前提下扩展可观测性、审计日志与加密解密。

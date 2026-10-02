@@ -45,10 +45,9 @@
 
 ## 2. 状态流转总览
 
-- **已完成 (DONE)**: TASK-001 ~ TASK-022, TASK-023-AUDIT, TASK-025-DEEP-AUDIT-HARDENING, TASK-029-AUTO-BATCH (25 项，包含 AutoBatch 与安全性能加固)
-- **待开发 (TODO)**: 0 项 (Milestone 2 及深度安全性能加固交付完毕)
-- **后续规划 (TODO)**: TASK-024 ~ TASK-028-QUEUE (5 项，Milestone 3 生产级功能扩展与生态演进)
-
+- **已完成 (DONE)**: TASK-001 ~ TASK-022, TASK-023-AUDIT, TASK-025-DEEP-AUDIT-HARDENING, TASK-029-AUTO-BATCH (25 项，已交付验证；历史任务卡片归档于 `docs/AI/tasks/completed/`)
+- **待开发 (TODO)**: TASK-028-QUEUE (生产级可靠任务队列子系统，规格见 `docs/AI/tasks/TASK-028-QUEUE.md`)
+- **后续规划 (TODO)**: TASK-024 (查询缓存), TASK-025-CACHE (前缀清理), TASK-026 (Docker 合规), TASK-027 (Redis/MySQL 驱动扩展)
 - **待审查/验证中 (REVIEW)**: 0 项
 - **已阻塞 (BLOCKED)**: 0 项
 
@@ -56,26 +55,16 @@
 
 ## 3. 当前主线执行链路
 
-### Milestone 2: 动态多键与物理索引架构 (已全部完成 100%)
+### 当前主线: Milestone 3 (生产级功能扩展与生态演进)
 
-```text
-[TASK-015 多键契约与类型] (DONE) ──> [TASK-016 动态 Key 扩展与演进] (DONE)
-                                         │
-            ┌────────────────────────────┼────────────────────────────┐
-            ▼                            ▼                            ▼
-      [TASK-017 SQLite] (DONE)   [TASK-018 Postgres] (DONE)   [TASK-019 Mongo] (DONE)
-            │                            │                            │
-            └────────────────────────────┼────────────────────────────┘
-                                         ▼
-                         [TASK-020 Table API 点查与索引查询] (DONE)
-                                         │
-                                         ▼
-                         [TASK-021 跨后端动态多键合规测试] (DONE)
-                                         │
-                                         ▼
-                         [TASK-022 规范文档与实战示例发布] (DONE)
-```
+- **Milestone 1**: 核心 KV 存储与基础驱动架构 (100% DONE)
+- **Milestone 2**: 动态多键与物理索引架构 (100% DONE)
+- **Milestone 3**:
+  - [x] TASK-029-AUTO-BATCH: 高性能微批处理与写聚合子系统 (DONE)
+  - [ ] TASK-028-QUEUE: 生产级可靠任务队列子系统 (TODO - 规格已就绪)
+  - [ ] TASK-024: 查询结果缓存 (Query Cache + Invalidation)
+  - [ ] TASK-025-CACHE: Cache 前缀清理能力 (deleteByPrefix)
+  - [ ] TASK-026: PostgreSQL 与 MongoDB 真实 Docker 环境合规验证
+  - [ ] TASK-027: Redis 与 MySQL 驱动扩展
 
-> **当前阶段完成**：Milestone 2 全部 8 个任务（TASK-015 ~ TASK-022）已全部顺利交付并通过完整单元、合规与示例验收。
-> **下一里程碑**：Milestone 3（生产级功能扩展：TASK-023 查询结果缓存、TASK-024 Cache 前缀清理、TASK-025 容器集成测试、TASK-026 Redis/MySQL 驱动扩展）。
 

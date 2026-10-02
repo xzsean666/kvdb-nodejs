@@ -45,24 +45,26 @@
 - [x] 插件/钩子运行时系统
 - [x] 基础单测套件（96 个单测全绿）与跨后端驱动合规套件骨架
 
-### Milestone 2: 动态多键（Multi-Key）与原生索引架构 (当前进行中 ⏳)
-- [ ] 动态多键契约与类型定义（`primaryKey` 声明、二级检索键声明、多类型支持）
-- [ ] 动态 Key 扩展与物理表自动演进机制（支持随时增键与幂等创建索引）
-- [ ] SQLite 动态多键驱动实现（支持数值/字符串主键、物理二级键、复合 B-Tree 索引）
-- [ ] PostgreSQL 动态多键驱动实现（多键映射与复合索引加速）
-- [ ] MongoDB 动态多键与顶级字段复合索引实现
-- [ ] Table API 升级（主键点查、二级键点查 `getBy`、直连物理 Key 索引查询）
-- [ ] 跨后端真实多键合规测试套件（SQLite / PG / Mongo）
-- [ ] 动态多键实战示例与发布验证（`examples/16-dynamic-multi-keys.ts`）
+### Milestone 2: 动态多键（Multi-Key）与原生索引架构 (已完成 ✅)
+- [x] 动态多键契约与类型定义（`primaryKey` 声明、二级检索键声明、多类型支持）
+- [x] 动态 Key 扩展与物理表自动演进机制（支持随时增键与幂等创建索引）
+- [x] SQLite 动态多键驱动实现（支持数值/字符串主键、物理二级键、复合 B-Tree 索引）
+- [x] PostgreSQL 动态多键驱动实现（多键映射与复合索引加速）
+- [x] MongoDB 动态多键与顶级字段复合索引实现
+- [x] Table API 升级（主键点查、二级键点查 `getBy`、直连物理 Key 索引查询）
+- [x] 跨后端真实多键合规测试套件（SQLite / PG / Mongo）
+- [x] 动态多键实战示例与发布验证（`examples/16-dynamic-multi-keys.ts`）
+- [x] 全面安全/性能/逻辑审计与生产级修复（TASK-023-AUDIT, TASK-025）
 
-### Milestone 3: 生产级验证与高级功能扩展 (规划中 📅)
-- [ ] 在 Docker / 真实环境中完成 PostgreSQL 与 MongoDB 端到端合规验证并回填测试状态
-- [ ] 查询级缓存（Query Cache：`find()` 结果缓存与写入自动失效）
-- [ ] 缓存前缀清理能力（`Cache.deleteByPrefix`，让 `Table.clear()` 级联清空对应缓存）
+### Milestone 3: 生产级验证与高级功能扩展 (当前进行中 ⏳)
+- [x] 高性能微批处理与写聚合子系统（Auto Batch & Write Coalescing，TASK-029 & TASK-030）
+- [ ] 生产级可靠任务队列子系统 (Queue Subsystem：原子租约、Visibility Timeout、指数退避重试、死信队列、全托管 Worker，TASK-028-QUEUE)
+- [ ] 查询级缓存（Query Cache：`find()` 结果缓存与写入自动失效，TASK-024）
+- [ ] 缓存前缀清理能力（`Cache.deleteByPrefix`，让 `Table.clear()` 级联清空对应缓存，TASK-025-CACHE）
+- [ ] 在 Docker / 真实环境中完成 PostgreSQL 与 MongoDB 端到端合规验证并回填测试状态（TASK-026）
+- [ ] 扩展后端支持：Redis 与 MySQL 驱动适配器（TASK-027）
 - [ ] SQL 后端对高级嵌套查询（如 `$elemMatch`）的原生/虚拟支持
-- [ ] 扩展后端支持：Redis 驱动适配器
-- [ ] 生产级可靠任务队列子系统 (Queue Subsystem：原子租约、Visibility Timeout、指数退避重试、死信队列、全托管 Worker)
-- [ ] CI/CD 自动化流水线（Lint、Prettier、Matrix 驱动测试）
+
 
 ---
 

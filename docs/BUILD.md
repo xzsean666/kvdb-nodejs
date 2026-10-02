@@ -1,7 +1,6 @@
-# BUILD.md — 构建与使用说明(Step 2 产出)
+# BUILD.md — 工程构建与使用说明
 
-> 本文件描述如何安装、构建、测试、运行本 SDK。
-> 注意:Step 4 尚未开始,以下命令对应**目标**工程结构;实际脚本在实现时落地到 `package.json`。
+> 本文件描述如何安装、构建、测试与运行 KVDB SDK。
 
 ---
 
@@ -9,141 +8,108 @@
 
 | 工具 | 版本 | 说明 |
 |---|---|---|
-| Node.js | v22+(开发机 v24.2) | 同步 SQLite 与现代 ESM |
+| Node.js | >= 22 (推荐 Node.js v24+) | 现代 ESM 与 Node.js 运行时 |
 | pnpm | 10.x | 唯一包管理器 |
-| TypeScript | 5.8 | TC39 标准装饰器 |
+| TypeScript | 5.8 | TC39 标准装饰器支持 |
 
 ---
 
-## 2. 安装(终端用户)
+## 2. 安装 (终端用户)
 
 ```bash
 pnpm add kvdb-sdk
-# 按需安装后端驱动(peerDependencies,不强制全装)
+
+# 按需安装后端驱动 (optional peerDependencies，只装你使用的数据库驱动)
 pnpm add better-sqlite3      # SQLite
 pnpm add pg                  # PostgreSQL
 pnpm add mongodb             # MongoDB
 ```
 
-> 后端驱动作为 **optional peerDependencies**:只装你用的后端,体积与安装成本最小。
-
 ---
 
-## 3. 目标工程结构
+## 3. 工程结构
 
 ```text
 kvdb-nodejs/
-  AGENTS.md                 # AI 工作守则(入口)
-  docs/                     # 架构与规格文档
-  src/                      # 源码(见 ARCHITECTURE.md 模块树)
-  test/
-    unit/                   # 纯单元测试(无 DB)
-    compliance/             # 跨后端合规套件(对真实 DB)
+  AGENTS.md                 # AI 代理工作守则与最高规范入口
+  README.md                 # 面向开发者的项目说明
   package.json
   tsconfig.json
-  tsup.config.ts            # 构建(ESM + CJS + d.ts)
-  vitest.config.ts          # 测试
+  tsup.config.ts            # 构建配置 (ESM + CJS + d.ts)
+  vitest.config.ts          # 测试配置
+  docs/                     # 架构、规格与 AI 上下文文档
+    ARCHITECTURE.md         # 统一系统架构总述
+    SPEC.md                 # API 契约与行为规格
+    BUILD.md                # 构建运行指南 (本文档)
+    EXTERNAL-DOCS.md        # 外部依赖官方文档索引
+    AI/                     # AI 状态机与任务管理
+      GOAL.md               # 里程碑与总目标
+      TASK_INDEX.md         # 任务总索引
+      SESSION_STATE.md      # 会话交接状态
+      DECISIONS.md          # 架构决策记录 (ADR)
+      tasks/                # 活跃任务卡片
+        completed/          # 历史已完成任务归档
+  src/                      # SDK 源码
+  test/                     # 单元测试与合规测试套件
+  examples/                 # 官方可运行实战示例
 ```
 
 ---
 
-## 4. 目标 package.json 关键字段(规格,非最终)
-
-```jsonc
-{
-  "type": "module",
-  "exports": {
-    ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js", "require": "./dist/index.cjs" }
-  },
-  "scripts": {
-    "build": "tsup src/index.ts --format esm,cjs --dts",
-    "dev": "tsup --watch",
-    "typecheck": "tsc --noEmit",
-    "test": "vitest run",
-    "test:compliance": "vitest run test/compliance",
-    "lint": "eslint .",
-    "format": "prettier --write ."
-  },
-  "peerDependencies": {
-    "better-sqlite3": "*", "pg": "*", "mongodb": "*"
-  },
-  "peerDependenciesMeta": {
-    "better-sqlite3": { "optional": true },
-    "pg": { "optional": true },
-    "mongodb": { "optional": true }
-  }
-}
-```
-
----
-
-## 5. 目标 tsconfig 关键项
-
-```jsonc
-{
-  "compilerOptions": {
-    "target": "ES2023",
-    "module": "NodeNext",
-    "moduleResolution": "NodeNext",
-    "strict": true,
-    "declaration": true,
-    "verbatimModuleSyntax": true
-    // 注意:不设置 experimentalDecorators —— 使用 TS5.x 原生 TC39 装饰器
-  }
-}
-```
-
----
-
-## 6. 常用命令(实现后)
+## 4. 常用开发命令
 
 ```bash
 pnpm install                # 安装依赖
-pnpm build                  # 构建产物到 dist/
-pnpm typecheck              # 仅类型检查
-pnpm test                   # 单元测试
-pnpm test:compliance        # 跨后端合规测试(需本地/容器数据库)
+pnpm build                  # 构建产物到 dist/ (ESM + CJS + .d.ts)
+pnpm dev                    # 监听变动增量构建
+pnpm typecheck              # 严苛 TypeScript 类型检查
+pnpm test                   # 运行全量单元测试与 SQLite 合规测试
+pnpm test:compliance        # 跨后端驱动合规测试
+pnpm test:e2e               # 真实文件与磁盘 E2E 测试
+pnpm examples               # 运行全量 22 个官方实战示例
+pnpm lint                   # ESLint 代码检查
+pnpm format                 # Prettier 代码格式化
 ```
 
 ---
 
-## 7. 合规测试的数据库(本地)
+## 5. 合规测试与多数据库环境
 
-合规套件**不 mock 数据库**。建议用容器:
+KVDB 合规套件严格针对真实数据库运行（不使用 Mock）：
 
 ```bash
-# PostgreSQL
-docker run --rm -e POSTGRES_PASSWORD=dev -p 5432:5432 postgres:17
-# MongoDB
-docker run --rm -p 27017:27017 mongo:7
-# SQLite 无需服务,使用临时文件 / :memory:
-```
+# SQLite 合规测试（零外部依赖，使用内存或临时文件）
+pnpm test:compliance
 
-环境变量(测试读取):
-```bash
-KVDB_TEST_PG_URL="postgres://postgres:dev@localhost:5432/postgres"
-KVDB_TEST_MONGO_URL="mongodb://localhost:27017/kvdb_test"
+# PostgreSQL 真实环境验证（建议使用 Docker）:
+docker run --rm -d --name kvdb-pg -e POSTGRES_PASSWORD=dev -p 5432:5432 postgres:17
+KVDB_TEST_PG_URL="postgres://postgres:dev@localhost:5432/postgres" pnpm test test/compliance/postgres.test.ts
+
+# MongoDB 真实环境验证（建议使用 Docker）:
+docker run --rm -d --name kvdb-mongo -p 27017:27017 mongo:7
+KVDB_TEST_MONGO_URL="mongodb://localhost:27017/kvdb_test" pnpm test test/compliance/mongodb.test.ts
 ```
 
 ---
 
-## 8. 最小使用示例(目标 API)
+## 6. 核心使用示例
 
-### 8.1 基础 KV 示例
+### 6.1 基础 KV 与 Auto Batch
 ```ts
 import { KVDB } from "kvdb-sdk";
 
 const db = new KVDB({ driver: "sqlite", url: "./data.db", tablePrefix: "app_" });
-const users = db.table<{ name: string; profile: { age: number } }>("users");
+const users = db.table<{ name: string; age: number }>("users");
 
-await users.set("u1", { name: "Ann", profile: { age: 20 } }, { ttlMs: 60_000 });
-const u = await users.get("u1");
-const adults = await users.find({ where: { "profile.age": { $gt: 18 } } });
+// 自动微批处理与内存写折叠（默认开启）
+await users.set("u1", { name: "Ann", age: 20 }, { ttlMs: 60_000 });
+const u = await users.get("u1"); // 0-RTT 内存直通读取
+const adults = await users.find({ where: { age: { $gte: 18 } } });
 
-await db.close();
+await db.close(); // 自动排空所有活跃表的批处理队列并释放连接
 ```
 
-### 8.2 动态多键（Multi-Key）物理表示例
+### 6.2 动态多键（Multi-Key）物理表
 ```ts
 const tokens = db.table("tokens", {
   schema: {
@@ -161,44 +127,8 @@ await tokens.set({
   keys: { address: "0x123", symbol: "ETH", chainId: "ethereum" },
   value: { name: "Ether", decimals: 18 },
 });
-const eth = await tokens.getBy("symbol", "ETH");
+const eth = await tokens.getBy("symbol", "ETH"); // 原生 B-Tree 索引点查
 
 // 动态加键与建索引（零停机演进）
 await tokens.addKey("isL2", { type: "boolean", default: false, index: true });
 ```
-
----
-
-## 9. 运行示例与合规测试
-
-### 9.1 运行实战示例
-KVDB 提供了丰富的完整可执行示例（位于 `examples/` 目录下）：
-```bash
-# 运行全部 16 个示例脚本
-pnpm examples
-
-# 运行特定动态多键实战示例
-pnpm example examples/16-dynamic-multi-keys.ts
-```
-
-### 9.2 跨后端合规测试套件
-合规测试覆盖基础 KV 操作与动态多键真实物理表（含自动演进、索引直查、点查与复合索引）：
-```bash
-# 本地 SQLite 合规测试（零配置自包含）
-pnpm test:compliance
-
-# 若测试 PostgreSQL / MongoDB 真实数据库（需提供容器环境）：
-KVDB_TEST_PG_URL="postgres://postgres:dev@localhost:5432/postgres" pnpm test test/compliance/postgres.test.ts
-KVDB_TEST_MONGO_URL="mongodb://localhost:27017/kvdb_test" pnpm test test/compliance/mongodb.test.ts
-```
-
----
-
-## 10. 发布(后续)
-
-```bash
-pnpm build && pnpm test && pnpm test:compliance
-# 版本与变更日志策略(changesets)在进入发布阶段时定稿
-```
-❗ 任何发布/推送动作需用户显式批准。
-

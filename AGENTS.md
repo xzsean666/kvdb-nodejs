@@ -26,7 +26,7 @@ KVDB SDK 是一个面向 Node.js 的**高性能、多驱动、可扩展**的 KV 
 - **任务索引**：`docs/AI/TASK_INDEX.md`
 - **当前状态**：`docs/AI/SESSION_STATE.md`
 - **当前任务**：`docs/AI/tasks/TASK-xxx.md`
-- **架构说明**：`docs/AI/ARCHITECTURE.md`（详尽架构见 `docs/ARCHITECTURE.md`）
+- **架构说明**：`docs/ARCHITECTURE.md`
 - **重要决策**：`docs/AI/DECISIONS.md`
 
 每开始任何一步之前,AI **必须**:
@@ -44,7 +44,7 @@ KVDB SDK 是一个面向 Node.js 的**高性能、多驱动、可扩展**的 KV 
 | Step 3 | 上下文交接 | `docs/AI/SESSION_STATE.md` | ❌ 否 |
 | Step 4 | 实现 | 代码、模块 | ✅ 仅在用户显式批准后 |
 
-> 当前状态: **Milestone 1 已完成；Milestone 2 (真实物理列表升级) 部分完成，待进一步审查与继续推进。** 详见 `docs/AI/SESSION_STATE.md` 与 `docs/AI/TASK_INDEX.md`。
+> 当前状态: **Milestone 1 与 Milestone 2 (动态多键与物理索引架构) 已 100% 全部完成；当前推进 Milestone 3 (生产级功能扩展与生态演进)。** 详见 `docs/AI/SESSION_STATE.md` 与 `docs/AI/TASK_INDEX.md`。
 
 ### 自我纠正规则
 
@@ -123,7 +123,7 @@ git commit -m "feat: <描述当前步骤>"
 | 全局任务索引与依赖流转 | `docs/AI/TASK_INDEX.md` |
 | 当前会话状态、未解决问题、下一步 | `docs/AI/SESSION_STATE.md` |
 | 细粒度任务规格与验收要求 | `docs/AI/tasks/TASK-xxx.md` |
-| 系统架构概览、模块边界、数据流 | `docs/AI/ARCHITECTURE.md` 与 `docs/ARCHITECTURE.md` |
+| 系统架构概览、模块边界、数据流 | `docs/ARCHITECTURE.md` |
 | 核心架构与设计决策记录 (ADR) | `docs/AI/DECISIONS.md` |
 | 公开 API、数据模型、契约、行为规格 | `docs/SPEC.md` |
 | 怎么构建、安装、运行、测试 | `docs/BUILD.md` |

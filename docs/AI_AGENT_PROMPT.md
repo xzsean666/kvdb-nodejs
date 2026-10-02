@@ -22,7 +22,7 @@
 - 任务索引：`docs/AI/TASK_INDEX.md`
 - 当前状态：`docs/AI/SESSION_STATE.md`
 - 当前任务：`docs/AI/tasks/TASK-xxx.md`
-- 架构说明：`docs/AI/ARCHITECTURE.md`
+- 架构说明：`docs/ARCHITECTURE.md`
 - 重要决策：`docs/AI/DECISIONS.md`
 
 如果文件路径不同，以仓库现有结构为准。
@@ -260,15 +260,18 @@ Next Task:
 ```text
 docs/
   AI_AGENT_PROMPT.md
+  ARCHITECTURE.md
+  SPEC.md
+  BUILD.md
+  EXTERNAL-DOCS.md
   AI/
     GOAL.md
     TASK_INDEX.md
     SESSION_STATE.md
-    ARCHITECTURE.md
     DECISIONS.md
     tasks/
-      TASK-001.md
-      TASK-002.md
+      TASK-xxx.md
+      completed/
 ```
 
 ### Task 模板 (`docs/AI/tasks/TASK-xxx.md`)

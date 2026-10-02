@@ -1,4 +1,4 @@
-# TASK-026: 生产级可靠任务队列系统 (Reliable Queue Subsystem)
+# TASK-028-QUEUE: 生产级可靠任务队列系统 (Reliable Queue Subsystem)
 
 ## 1. 目标
 在 `kvdb-nodejs` 中设计与实现开箱即用、零外部服务依赖（无需 Redis/RabbitMQ）、高并发防重消费的生产级任务队列。
@@ -23,3 +23,7 @@
 - 支持延迟任务与基于指数退避的自动重试。
 - 超时未确认任务由 Visibility Timeout 机制自动回收。
 - 达到最大尝试次数自动进入死信队列（`failed`）。
+
+## Status
+TODO
+
