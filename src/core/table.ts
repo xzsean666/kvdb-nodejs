@@ -30,6 +30,8 @@ import type {
 } from "./table-schema.js";
 import { validateColumnValues } from "./table-schema.js";
 import type { SchemaTableDriver } from "../drivers/types.js";
+import { WriteBatcher } from "./batcher.js";
+import type { AutoBatchOptions, BatchFlushPayload, BatchFlushResult } from "./batcher.js";
 
 
 /** User-facing query document for `find` (parsed into the AST internally). */
@@ -67,10 +69,169 @@ export interface TableDependencies {
   autoIndex?: AutoIndexManager;
   schemaName?: string;
   schema?: TableSchema | MultiKeySchema;
+  /** Optional micro-batch and coalescing options. */
+  autoBatch?: boolean | AutoBatchOptions;
 }
 
 export class Table<Value = JsonValue, Columns extends Record<string, unknown> = Record<string, unknown>> {
-  constructor(private readonly deps: TableDependencies) {}
+  private readonly writeBatcher?: WriteBatcher<Value>;
+  private readonly inFlightUpdates = new Map<string, Promise<unknown>>();
+
+  constructor(private readonly deps: TableDependencies) {
+    if (deps.autoBatch) {
+      const opts: AutoBatchOptions = typeof deps.autoBatch === "object" ? deps.autoBatch : {};
+      this.writeBatcher = new WriteBatcher<Value>(
+        async (payload) => this.flushBatch(payload),
+        opts,
+      );
+    }
+  }
+
+  /** Immediately flushes all queued writes in the auto-batch buffer. */
+  async flush(): Promise<void> {
+    if (this.writeBatcher) {
+      await this.writeBatcher.flush();
+    }
+  }
+
+  /** Count of write operations waiting in the auto-batch buffer. */
+  get pendingBatchCount(): number {
+    return this.writeBatcher?.pendingCount ?? 0;
+  }
+
+  private async flushBatch(payload: BatchFlushPayload<Value>): Promise<BatchFlushResult | void> {
+    const schema = await this.schemaDriver();
+    const deletedKeys = new Set<string | number>();
+
+    if (schema) {
+      if (payload.sets.length > 0) {
+        const recordsToSet = payload.sets.map((item) => {
+          const rawKeys = item.keys;
+          const columns = validateColumnValues(schema.schema, rawKeys);
+          return {
+            key: item.key,
+            value: serialize(item.value as JsonValue),
+            columns,
+            ttlMs: item.ttlMs,
+          };
+        });
+
+        if (schema.setRecords && payload.sqlAggregation) {
+          await schema.setRecords(recordsToSet);
+        } else {
+          for (const r of recordsToSet) {
+            await schema.setRecord(r.key, r.value, r.columns, r.ttlMs);
+          }
+        }
+
+        if (this.deps.cache) {
+          await Promise.all(
+            payload.sets.map((item) =>
+              this.deps.cache!.set(
+                this.cacheKey(String(item.key), true),
+                item.value,
+                item.ttlMs,
+              ),
+            ),
+          );
+        }
+
+        if (this.deps.hooks.has("afterWrite")) {
+          for (const item of payload.sets) {
+            await this.deps.hooks.run("afterWrite", {
+              namespace: this.namespace,
+              key: String(item.key),
+              value: item.value as JsonValue,
+              ttlMs: item.ttlMs,
+            });
+          }
+        }
+      }
+
+      if (payload.deletes.length > 0) {
+        if (schema.deleteRecords && payload.sqlAggregation) {
+          await schema.deleteRecords(payload.deletes as (string | number)[]);
+        } else {
+          for (const key of payload.deletes) {
+            const ok = await schema.delete(key);
+            if (ok) deletedKeys.add(key);
+          }
+        }
+
+        if (this.deps.cache) {
+          await Promise.all(
+            payload.deletes.map((key) =>
+              this.deps.cache!.delete(this.cacheKey(String(key), true)),
+            ),
+          );
+        }
+      }
+
+      return { deletedKeys };
+    }
+
+    const driver = await this.deps.getDriver();
+    if (payload.sets.length > 0) {
+      const entries = payload.sets.map((item) => ({
+        key: toPhysicalKey(this.deps.scope, String(item.key)),
+        value: serialize(item.value as JsonValue),
+        ttlMs: item.ttlMs,
+      }));
+
+      if (driver.setMany && payload.sqlAggregation) {
+        await driver.setMany(entries);
+      } else {
+        for (const entry of entries) {
+          await driver.set(entry.key, entry.value, entry.ttlMs);
+        }
+      }
+
+      if (this.deps.cache) {
+        await Promise.all(
+          payload.sets.map((item) =>
+            this.deps.cache!.set(
+              toPhysicalKey(this.deps.scope, String(item.key)),
+              item.value,
+              item.ttlMs,
+            ),
+          ),
+        );
+      }
+
+      if (this.deps.hooks.has("afterWrite")) {
+        for (const item of payload.sets) {
+          await this.deps.hooks.run("afterWrite", {
+            namespace: this.namespace,
+            key: String(item.key),
+            value: item.value as JsonValue,
+            ttlMs: item.ttlMs,
+          });
+        }
+      }
+    }
+
+    if (payload.deletes.length > 0) {
+      const strKeys = payload.deletes.map(String);
+      const physicalKeys = strKeys.map((k) => toPhysicalKey(this.deps.scope, k));
+
+      if (driver.deleteMany && payload.sqlAggregation) {
+        await driver.deleteMany(physicalKeys);
+      } else {
+        for (let i = 0; i < physicalKeys.length; i++) {
+          const ok = await driver.delete(physicalKeys[i]!);
+          if (ok) deletedKeys.add(payload.deletes[i]!);
+        }
+      }
+
+      if (this.deps.cache) {
+        await Promise.all(
+          physicalKeys.map((pk) => this.deps.cache!.delete(pk)),
+        );
+      }
+    }
+
+    return { deletedKeys };
+  }
 
   private get namespace(): string {
     return this.deps.scope.namespace;
@@ -123,6 +284,16 @@ export class Table<Value = JsonValue, Columns extends Record<string, unknown> = 
           ttlMs: options.ttlMs,
         };
 
+    if (this.writeBatcher) {
+      const rawKeys = (options.keys ?? options.columns) as Record<string, unknown> | undefined;
+      return this.writeBatcher.enqueue({
+        key,
+        value: before.value as Value,
+        keys: rawKeys,
+        ttlMs: before.ttlMs,
+      });
+    }
+
     const schema = await this.schemaDriver();
     const cKey = this.cacheKey(strKey, Boolean(schema));
     if (schema) {
@@ -169,6 +340,59 @@ export class Table<Value = JsonValue, Columns extends Record<string, unknown> = 
     options: SetOptions = {},
   ): Promise<Value> {
     const strKey = String(key);
+
+    if (this.writeBatcher) {
+      // 1. In-memory fast path: check pending batch buffer first
+      const pending = this.writeBatcher.getPending(key);
+      if (pending) {
+        if (pending.type === "delete") {
+          throw new KvdbError(
+            "QUERY",
+            `Cannot update key "${key}" in namespace "${this.deps.schemaName ?? this.namespace}": it does not exist`,
+          );
+        }
+        const currentVal = pending.item?.value as Value;
+        const written = applyPatch(currentVal, patch);
+        const writtenTtl = options.ttlMs ?? pending.item?.ttlMs;
+        await this.set(key, written, {
+          ...options,
+          ttlMs: writtenTtl,
+          keys: (options.keys ?? options.columns ?? pending.item?.keys) as any,
+        });
+        return written;
+      }
+
+      // 2. Fetch with in-flight deduplication
+      let fetchPromise = this.inFlightUpdates.get(strKey) as Promise<Value | undefined> | undefined;
+      if (!fetchPromise) {
+        fetchPromise = this.get(key);
+        this.inFlightUpdates.set(strKey, fetchPromise as Promise<unknown>);
+      }
+
+      let currentVal: Value | undefined;
+      try {
+        currentVal = await fetchPromise;
+      } finally {
+        this.inFlightUpdates.delete(strKey);
+      }
+
+      // Recheck if concurrent update enqueued into writeBatcher while fetching
+      const recheckedPending = this.writeBatcher.getPending(key);
+      if (recheckedPending && recheckedPending.type === "set" && recheckedPending.item) {
+        currentVal = recheckedPending.item.value as Value;
+      }
+
+      if (currentVal === undefined) {
+        throw new KvdbError(
+          "QUERY",
+          `Cannot update key "${key}" in namespace "${this.deps.schemaName ?? this.namespace}": it does not exist`,
+        );
+      }
+
+      const written = applyPatch(currentVal, patch);
+      await this.set(key, written, options);
+      return written;
+    }
     const schema = await this.schemaDriver();
     const cKey = this.cacheKey(strKey, Boolean(schema));
     if (schema) {
@@ -250,6 +474,19 @@ export class Table<Value = JsonValue, Columns extends Record<string, unknown> = 
 
   async get(key: string | number): Promise<Value | undefined> {
     const strKey = String(key);
+    if (this.writeBatcher) {
+      const pending = this.writeBatcher.getPending(key);
+      if (pending) {
+        if (pending.type === "delete") return undefined;
+        if (pending.item) {
+          return deserialize<Value>(serialize(pending.item.value as JsonValue));
+        }
+      }
+      if (this.writeBatcher.isFlushingNow) {
+        await this.writeBatcher.flush();
+      }
+    }
+
     if (this.deps.hooks.has("beforeRead")) {
       await this.deps.hooks.run("beforeRead", { namespace: this.namespace, key: strKey, value: undefined });
     }
@@ -294,6 +531,9 @@ export class Table<Value = JsonValue, Columns extends Record<string, unknown> = 
 
 
   async delete(key: string | number): Promise<boolean> {
+    if (this.writeBatcher) {
+      return this.writeBatcher.enqueueDelete(key);
+    }
     const strKey = String(key);
     const schema = await this.schemaDriver();
     const cKey = this.cacheKey(strKey, Boolean(schema));
@@ -306,6 +546,15 @@ export class Table<Value = JsonValue, Columns extends Record<string, unknown> = 
   }
 
   async exists(key: string | number): Promise<boolean> {
+    if (this.writeBatcher) {
+      const pending = this.writeBatcher.getPending(key);
+      if (pending) {
+        return pending.type === "set";
+      }
+      if (this.writeBatcher.isFlushingNow) {
+        await this.writeBatcher.flush();
+      }
+    }
     const schema = await this.schemaDriver();
     if (schema) return (await schema.getRecord(key)) !== undefined;
     const driver = await this.deps.getDriver();
@@ -314,6 +563,9 @@ export class Table<Value = JsonValue, Columns extends Record<string, unknown> = 
 
   /** Clear this namespace only (not the whole backend). */
   async clear(): Promise<void> {
+    if (this.writeBatcher) {
+      await this.writeBatcher.flush();
+    }
     const schema = await this.schemaDriver();
     if (schema) {
       await schema.clear();
@@ -324,6 +576,9 @@ export class Table<Value = JsonValue, Columns extends Record<string, unknown> = 
   }
 
   async getMany(keys: (string | number)[]): Promise<(Value | undefined)[]> {
+    if (this.writeBatcher && (this.writeBatcher.pendingCount > 0 || this.writeBatcher.isFlushingNow)) {
+      await this.writeBatcher.flush();
+    }
     const schema = await this.schemaDriver();
     if (schema) {
       return Promise.all(keys.map((k) => this.get(k)));
@@ -438,6 +693,9 @@ export class Table<Value = JsonValue, Columns extends Record<string, unknown> = 
   }
 
   async getByPrefix(prefix: string): Promise<{ key: string; value: Value }[]> {
+    if (this.writeBatcher && (this.writeBatcher.pendingCount > 0 || this.writeBatcher.isFlushingNow)) {
+      await this.writeBatcher.flush();
+    }
     const schema = await this.schemaDriver();
     if (schema) {
       throw new KvdbError(
@@ -455,6 +713,9 @@ export class Table<Value = JsonValue, Columns extends Record<string, unknown> = 
   }
 
   async deleteByPrefix(prefix: string): Promise<number> {
+    if (this.writeBatcher && (this.writeBatcher.pendingCount > 0 || this.writeBatcher.isFlushingNow)) {
+      await this.writeBatcher.flush();
+    }
     const schema = await this.schemaDriver();
     if (schema) {
       throw new KvdbError(
@@ -467,6 +728,9 @@ export class Table<Value = JsonValue, Columns extends Record<string, unknown> = 
   }
 
   async find(query: FindQuery = {}): Promise<{ key: string; value: Value }[]> {
+    if (this.writeBatcher && (this.writeBatcher.pendingCount > 0 || this.writeBatcher.isFlushingNow)) {
+      await this.writeBatcher.flush();
+    }
     const schema = await this.schemaDriver();
     if (schema) {
       const mergedWhere = {
@@ -550,6 +814,9 @@ export class Table<Value = JsonValue, Columns extends Record<string, unknown> = 
   }
 
   async getRecord(key: string | number): Promise<PhysicalRecord<Columns, Value> | undefined> {
+    if (this.writeBatcher && (this.writeBatcher.pendingCount > 0 || this.writeBatcher.isFlushingNow)) {
+      await this.writeBatcher.flush();
+    }
     const schema = await this.schemaDriver();
     if (!schema) {
       const value = await this.get(key);
@@ -570,6 +837,9 @@ export class Table<Value = JsonValue, Columns extends Record<string, unknown> = 
    * Fast O(1) point lookup by any indexed secondary key.
    */
   async getBy(keyName: string, keyValue: unknown): Promise<PhysicalRecord<Columns, Value> | undefined> {
+    if (this.writeBatcher && (this.writeBatcher.pendingCount > 0 || this.writeBatcher.isFlushingNow)) {
+      await this.writeBatcher.flush();
+    }
     const schema = await this.schemaDriver();
     if (!schema) {
       throw new KvdbError(
@@ -600,6 +870,9 @@ export class Table<Value = JsonValue, Columns extends Record<string, unknown> = 
    * Dynamically add a secondary key to this table and evolve underlying physical schema.
    */
   async addKey(name: string, definition: KeyDefinition): Promise<void> {
+    if (this.writeBatcher) {
+      await this.writeBatcher.flush();
+    }
     const schemaDriver = await this.schemaDriver();
     if (!schemaDriver) {
       throw new KvdbError(
@@ -618,6 +891,9 @@ export class Table<Value = JsonValue, Columns extends Record<string, unknown> = 
    * Dynamically add an index to this table.
    */
   async addIndex(definition: TableIndexDefinition | MultiKeyIndexDefinition): Promise<void> {
+    if (this.writeBatcher) {
+      await this.writeBatcher.flush();
+    }
     const schemaDriver = await this.schemaDriver();
     if (!schemaDriver) {
       throw new KvdbError(

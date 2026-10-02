@@ -39,14 +39,15 @@
 | **TASK-026** | PostgreSQL 与 MongoDB 真实 Docker 环境合规验证 | M3 | **TODO** | TASK-008, 021 | `test/compliance/*` |
 | **TASK-027** | Redis 与 MySQL 驱动扩展 | M3 | **TODO** | TASK-007 | `src/drivers/*` |
 | **TASK-028-QUEUE** | 生产级可靠任务队列子系统 (Queue Subsystem) | M3 | **TODO** | TASK-020 | `src/queue/*`, `src/core/kvdb.ts` |
+| **TASK-029-AUTO-BATCH** | 高性能微批处理与写聚合子系统 (Auto Batch & Write Coalescing) | M3 | **DONE** | TASK-020 | `src/core/batcher.ts`, `src/core/table.ts`, `src/core/kvdb.ts`, `src/drivers/*` |
 
 ---
 
 ## 2. 状态流转总览
 
-- **已完成 (DONE)**: TASK-001 ~ TASK-022, TASK-023-AUDIT, TASK-025-DEEP-AUDIT-HARDENING (24 项，包含系统深度审计与安全性能加固)
+- **已完成 (DONE)**: TASK-001 ~ TASK-022, TASK-023-AUDIT, TASK-025-DEEP-AUDIT-HARDENING, TASK-029-AUTO-BATCH (25 项，包含 AutoBatch 与安全性能加固)
 - **待开发 (TODO)**: 0 项 (Milestone 2 及深度安全性能加固交付完毕)
-- **后续规划 (TODO)**: TASK-024 ~ TASK-027 (4 项，Milestone 3 生产级功能扩展与生态演进)
+- **后续规划 (TODO)**: TASK-024 ~ TASK-028-QUEUE (5 项，Milestone 3 生产级功能扩展与生态演进)
 
 - **待审查/验证中 (REVIEW)**: 0 项
 - **已阻塞 (BLOCKED)**: 0 项

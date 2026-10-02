@@ -27,6 +27,7 @@ import type {
   TableIndexDefinition,
   MultiKeyIndexDefinition,
 } from "./table-schema.js";
+import type { AutoBatchOptions } from "./batcher.js";
 
 
 /** Driver names accepted in config (mirrors docs/SPEC.md and the README). */
@@ -61,12 +62,16 @@ export interface KVDBOptions {
    * never keeps the process alive, and is cleared on close().
    */
   ttlCleanupIntervalMs?: number;
+  /** Global micro-batch write & coalescing configuration. */
+  autoBatch?: boolean | AutoBatchOptions;
 }
 
 export interface TableOptions<Columns extends Record<string, unknown> = Record<string, unknown>> {
   /** Per-table cache; overrides the instance cache for this namespace. */
   cache?: CacheOptions | Cache;
   schema?: TableSchema<Columns> | MultiKeySchema<Columns> | TableSchema<any> | MultiKeySchema<any>;
+  /** Per-table micro-batch write & coalescing configuration (overrides global). */
+  autoBatch?: boolean | AutoBatchOptions;
 }
 
 export interface AlterTableOptions {
@@ -81,6 +86,8 @@ export class KVDB {
   private readonly hooks: HookRuntime;
   private readonly autoIndex: AutoIndexManager | undefined;
   private readonly ttlCleanupIntervalMs: number | undefined;
+  private readonly autoBatch: boolean | AutoBatchOptions | undefined;
+  private readonly tables = new Set<Table<any, any>>();
   private driverPromise: Promise<Driver> | undefined;
   private cleanupTimer: ReturnType<typeof setInterval> | undefined;
 
@@ -92,6 +99,7 @@ export class KVDB {
     for (const plugin of options.plugins ?? []) this.hooks.register(plugin);
     this.autoIndex = resolveAutoIndex(options.autoIndex);
     this.ttlCleanupIntervalMs = options.ttlCleanupIntervalMs;
+    this.autoBatch = options.autoBatch;
   }
 
   /** Create a namespaced Table. Values are typed via the `Value` parameter. */
@@ -100,7 +108,8 @@ export class KVDB {
     options: TableOptions<Columns> = {},
   ): Table<Value, Columns> {
     const cache = options.cache ? toCache(options.cache) : this.cache;
-    return new Table<Value, Columns>({
+    const autoBatch = options.autoBatch ?? this.autoBatch;
+    const tbl = new Table<Value, Columns>({
       getDriver: () => this.getDriver(),
       scope: { tablePrefix: this.tablePrefix, namespace },
       cache,
@@ -108,7 +117,10 @@ export class KVDB {
       autoIndex: this.autoIndex,
       schemaName: namespace,
       schema: options.schema,
+      autoBatch,
     });
+    this.tables.add(tbl);
+    return tbl;
   }
 
   /** Dynamically alter an existing schema table: add keys and/or indexes. */
@@ -124,7 +136,6 @@ export class KVDB {
 
   /** Delete all currently-expired entries across the backend; returns the count. */
   async purgeExpired(): Promise<number> {
-
     return (await this.getDriver()).purgeExpired();
   }
 
@@ -143,6 +154,12 @@ export class KVDB {
       clearInterval(this.cleanupTimer);
       this.cleanupTimer = undefined;
     }
+    // Flush all active tables before closing driver
+    await Promise.all(
+      Array.from(this.tables).map((t) => t.flush().catch(() => {})),
+    );
+    this.tables.clear();
+
     if (this.driverPromise === undefined) return;
     const driver = await this.driverPromise;
     this.driverPromise = undefined;

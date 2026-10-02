@@ -116,4 +116,14 @@ export {
   evolveSchemaAddIndex,
 } from "./core/table-schema.js";
 
+// Micro-batch write & coalescing engine (docs/SPEC.md §13).
+export { WriteBatcher, compareKeysDeterministic, sanitizeSecondaryKeys } from "./core/batcher.js";
+export type {
+  AutoBatchOptions,
+  BatchSetItem,
+  BatchFlushPayload,
+  BatchFlushResult,
+  FlushHandler,
+} from "./core/batcher.js";
+
 

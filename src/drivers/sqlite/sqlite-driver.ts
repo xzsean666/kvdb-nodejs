@@ -362,7 +362,9 @@ class SqliteDriver implements Driver {
       }
       for (const index of norm.indexes) this.createCompositeIndex(physical, index);
     }
-    return new SqliteSchemaTable(this.database, physical, name, resolved);
+    const tbl = new SqliteSchemaTable(this.database, physical, name, resolved);
+    this.schemaTables.add(tbl);
+    return tbl;
   }
 
   private createColumnIndex(
@@ -424,11 +426,21 @@ class SqliteDriver implements Driver {
     return total;
   }
 
+  private readonly schemaTables = new Set<SqliteSchemaTable<any>>();
+
   raw(): BetterSqlite3.Database {
     return this.database;
   }
 
   async close(): Promise<void> {
+    this.queryStatements.clear();
+    (this as any).statements = undefined;
+    this.writeAll = undefined;
+    this.deleteAll = undefined;
+    for (const tbl of this.schemaTables) {
+      tbl.dispose();
+    }
+    this.schemaTables.clear();
     this.database.close();
   }
 }
@@ -453,6 +465,16 @@ class SqliteSchemaTable<Columns extends Record<string, unknown>>
   ) => void;
   private deleteAllRecords?: (keys: (string | number)[]) => number;
   private readonly queryStatements = new Map<string, BetterSqlite3.Statement>();
+
+  dispose(): void {
+    this.queryStatements.clear();
+    if (this.statements?.getBy) {
+      this.statements.getBy.clear();
+    }
+    (this as any).statements = undefined;
+    this.writeAllRecords = undefined;
+    this.deleteAllRecords = undefined;
+  }
 
 
   constructor(

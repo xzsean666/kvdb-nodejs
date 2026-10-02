@@ -136,4 +136,35 @@
   2. `Table` 访问生命周期钩子时引入 `has(hook)` 同步守卫，未启用插件场景下完全避免 payload 对象堆分配与 Promise 调度开销。
   3. 自动索引构建 `ensureIndex` 从查询读路径中解耦为非阻塞异步后台构建，杜绝查询长尾抖动。
 
+---
+
+## 微批处理与写聚合决策 (Auto Batch & Coalescing Decisions)
+
+### KD-BATCH1. 两层聚合正交设计 (coalesce & sqlAggregation) 与 Multi-Key 增量合并
+- **背景与理由**：
+  批处理存在两类截然不同的应用需求：一类是高频热点写入（计数器、日志快照），追求极大吞吐量与消除 Postgres MVCC 死元组；另一类是事务审计与 CDC 流水（Debezium/触发器），要求不折叠中间状态。同时在 Multi-Key 物理表中，多次更新可能分别涉及不同二级列。
+- **决策内容**：
+  1. **正交双层配置**：
+     - `coalesce: boolean`（默认 `true`）：控制应用内存队列是否进行同 Key 覆盖写与写删抵消。
+     - `sqlAggregation: boolean`（默认 `true`）：控制底层下发是拼装为单条 multi-row SQL 还是在单事务内循环独立 Prepared Statement。
+  2. **Multi-Key 增量浅合并**：
+     在 `coalesce: true` 下，同一微批内同 Key 多次写入时，对二级索引键 `keys` / `columns` 执行增量浅合并（`mergedKeys = { ...existing.keys, ...newItem.keys }`），并严格过滤 `__proto__` / `constructor` / `prototype`，确保多列索引不丢失且免疫原型链污染。
+
+### KD-BATCH2. PostgreSQL 交叉行锁死锁消除（主键确定性排序）与优雅停机
+- **背景与理由**：
+  PostgreSQL 在并发执行多行 `INSERT ... ON CONFLICT DO UPDATE` 时，会对每一行获取行级排他锁。如果不同事务/批次中的行顺序不一致，极易发生 `deadlock detected` 导致事务被强制回滚。此外 Node.js 服务端需要防范停机丢数据。
+- **决策内容**：
+  1. **主键严格确定性排序**：下发至 Postgres（以及 SQLite）底层批处理前，必须对待提交数据按主键（字典序/数值序）严格升序排序，使所有连接与事务获取行锁的方向永远单调递增，数学上彻底根除交叉死锁。
+  2. **优雅停机与进程守护**：`WriteBatcher` 内部使用 Node.js `timer.unref()` 避免阻塞进程自然退出；`KVDB.close()` 自动遍历并排空所有活跃 Table 的批缓冲区，确保在进程停机前数据 100% 持久化。
+  3. **容量背压保护**：引入 `maxBufferSize`（默认 `maxBatchSize * 10`），当未排空条目超限时触发同步背压立即强制排空，防止突发流量挤爆堆内存。
+
+### KD-BATCH3. 同 Key 并发读改写内存直通与防击穿一致性保证
+- **背景与理由**：
+  并发调用 `table.update(k, fn)` 时，如果 Key 尚在异步查询 DB 途中，后来的并发调用可能读到旧快照导致丢失更新；若 Key 已在微批队列中，再查 DB 属于无效 I/O 且会读到脏旧值。
+- **决策内容**：
+  1. **内存直通（In-Memory Fast-Path）**：`table.update` 优先检查 `writeBatcher.getPending(k)`。若已存在待写条目，直接在内存中同步提取最新值计算，实现 0 次 DB 往返与本地单线程严格原子合并。
+  2. **初次查询防击穿 Promise 链**：若 Key 正在被首个 `update` 从 DB 异步读取，后继并发 `update` 自动排队接入该 Key 的在途 Promise 链，等数据返回后串行执行更新，杜绝丢失更新。
+  3. **读己之写（RYW）保障**：`table.get` / `getMany` / `find` 在读取前，先检测并执行 `flush()`（或针对点查直接内存直通命中），杜绝读到旧数据。
+
+
 

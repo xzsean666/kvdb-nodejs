@@ -468,3 +468,40 @@ const cleaned = await queue.clean({
 await queue.retryFailed();
 ```
 
+---
+
+## 13. 高性能微批处理与写聚合 (Auto Batch & Coalescing)
+
+### 13.1 配置与启动
+Auto Batch 可以在全局 `KVDBOptions` 中配置，也可以在具体的 `TableOptions` 中按表独立定制：
+
+```ts
+export interface AutoBatchOptions {
+  /** 达到多少条时立即刷新下发底层。默认: 50 */
+  maxBatchSize?: number;
+  /** 最大防抖等待时间(ms)。默认: 20 */
+  maxWaitMs?: number;
+  /** 内存折叠模式: true 覆盖写与写删抵消; false 严格时序微批。默认: true */
+  coalesce?: boolean;
+  /** SQL 聚合模式: true 生成单条 multi-row SQL; false 单事务多条 Prepared SQL。默认: true */
+  sqlAggregation?: boolean;
+}
+
+const table = db.table("events", {
+  autoBatch: {
+    maxBatchSize: 100,
+    maxWaitMs: 20,
+    coalesce: true,
+    sqlAggregation: true,
+  }
+});
+```
+
+### 13.2 核心行为与语义保证
+1. **Multi-Key 增量浅合并**: 同 Key 多次写入携带不同二级键时，自动进行字段增量合并（`{ ...existing.keys, ...newItem.keys }`），并阻断原型链污染。
+2. **读己之写一致性 (RYW)**: `get(k)` / `find()` 在执行前检测是否有待写缓存，自动排空或内存直通，确保 100% 读到最新状态。
+3. **并发更新防击穿与内存直通**: 针对同一 Key 的连续 `update`，若处于缓冲中直接在内存完成原子计算，0 次数据库网络往返；初次查询自动建立 Promise 防击穿队列。
+4. **PostgreSQL 死锁杜绝**: 下发前对待写主键进行严格升序排序，使并发事务获取行锁方向单调一致，彻底杜绝交叉死锁。
+5. **优雅关闭与持久化保障**: `await table.flush()` 可显式排空；`await db.close()` 自动排空所有活跃表的批处理队列。
+
+

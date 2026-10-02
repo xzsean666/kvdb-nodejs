@@ -25,6 +25,7 @@ import { parsePath } from "../../query/parser.js";
 import { PostgresDialect } from "./dialect.js";
 import { expiresAtFromTtl } from "../../core/expiry.js";
 import { KvdbConfigError, KvdbConnectionError } from "../../core/errors.js";
+import { compareKeysDeterministic } from "../../core/batcher.js";
 import {
   validateTableSchema,
   schemasEqual,
@@ -215,11 +216,15 @@ export class PostgresDriver implements Driver {
   }
 
   async setMany(entries: KVEntry[]): Promise<void> {
+    if (entries.length === 0) return;
+    const sortedEntries = entries.length > 1
+      ? entries.slice().sort((a, b) => compareKeysDeterministic(a.key, b.key))
+      : entries;
     const client = await this.pool.connect();
     try {
       await client.query("BEGIN");
       const now = Date.now();
-      for (const entry of entries) {
+      for (const entry of sortedEntries) {
         await client.query(
           `INSERT INTO "${this.table}" ("key", "value", "expires_at", "created_at", "updated_at")
            VALUES ($1, $2, $3, $4, $4)
@@ -507,6 +512,9 @@ class PostgresSchemaTable<Columns extends Record<string, unknown>> implements Sc
     }>,
   ): Promise<void> {
     if (items.length === 0) return;
+    const sortedItems = items.length > 1
+      ? items.slice().sort((a, b) => compareKeysDeterministic(a.key, b.key))
+      : items;
     const client = await this.pool.connect();
     try {
       await client.query("BEGIN");
@@ -519,8 +527,8 @@ class PostgresSchemaTable<Columns extends Record<string, unknown>> implements Sc
       const now = Date.now();
 
       const CHUNK_SIZE = 200;
-      for (let i = 0; i < items.length; i += CHUNK_SIZE) {
-        const chunk = items.slice(i, i + CHUNK_SIZE);
+      for (let i = 0; i < sortedItems.length; i += CHUNK_SIZE) {
+        const chunk = sortedItems.slice(i, i + CHUNK_SIZE);
         const params: unknown[] = [];
         const valueTuples: string[] = [];
 

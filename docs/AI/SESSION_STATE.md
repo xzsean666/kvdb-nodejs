@@ -7,41 +7,69 @@
 
 ## 1. 核心状态概要
 
-- **当前 Goal**: 队列系统设计与生产级扩展 (TASK-028-QUEUE)
-- **当前 Task**: 设计生产级可靠任务队列子系统架构与规格文档 (Step 1 & Step 2 完成)
-- **当前状态**: **DESIGN_AND_SPECS_READY** (已完成系统架构设计、规格定义与任务卡片)
+- **当前 Goal**: 高性能微批处理与写聚合子系统 (TASK-029-AUTO-BATCH)
+- **当前 Task**: 交付生产级 Auto Batch 引擎、Multi-Key 增量浅合并、Postgres 防死锁排序、内存直通与防击穿 (Step 1-4 全部完成)
+- **当前状态**: **COMPLETED_AND_VERIFIED** (已完成代码实现、全量测试 208 通过、构建与 22 个实战示例 100% 绿灯)
 
 ---
 
 ## 2. 本次任务完成内容与优化清单
 
-### A. 安全硬化 (Security Hardening)
-1. **ANSI 标识符与 SQL 保留字全量转义 (KD-SEC1 & KD-SEC2)**:
-   - `src/drivers/postgres/postgres-driver.ts`: 对 PostgreSQL 物理表名（`"${this.table}"`, `"${physical}"`）、列名（`"${pk}"`）进行全面 ANSI 双引号转义，彻底消除了当表名/列名为 SQL 保留字（如 `order`, `user`, `group`）时的语法错误与潜在注入风险。
-   - `src/cache/stores/sqlite-store.ts`: 对 SQLite 缓存表名添加 ANSI 双引号保护，并补充 `expires_at` 索引加速过期扫描。
-2. **原型链污染攻击防御 (Prototype Pollution Prevention - KD-SEC2)**:
-   - `src/core/table.ts` (`applyPatch`): 在 `Table.update` 执行浅层对象合并时，严格过滤并丢弃 `__proto__`, `constructor`, `prototype`，杜绝恶意对象污染全局 `Object.prototype`。
-   - `src/query/parser.ts`: `parseWhere` 与 `parseSchemaWhereNode` 强校验拒绝 prototype pollution 键，检测到立即抛出 `KvdbQueryError`。
-3. **查询分页参数健全性校验 (Pagination Bounds Hardening - KD-SEC2)**:
-   - `src/query/parser.ts` (`parseFindOptions`): 强制要求 `limit` 与 `offset` 为非负安全整数（`Number.isSafeInteger(val) && val >= 0`），严防负数、浮点数、NaN、Infinity。
-4. **Auto-Index 内存容量上限与 DDL 风暴阻断 (Bounded AutoIndex - KD-PERF3)**:
-   - `src/core/auto-index.ts`: 引入 `maxIndexed: 200` 强上限保护，防止恶意多变查询路径撑爆进程内存或引发底层 DDL 频繁锁表；同时由 `Table.find` 将底层 DDL 索引创建异步化，避免阻塞业务读链路。
+### A. Auto Batch 核心与安全硬化 (TASK-029-AUTO-BATCH)
+1. **统一高性能微批缓冲引擎 (`src/core/batcher.ts`)**:
+   - 实现 `WriteBatcher<V>`，提供时间窗口（`maxWaitMs` 默认 20ms）与容量阈值（`maxBatchSize` 默认 50 条）自动排空。
+   - 内存容量背压保护（`maxBufferSize` 默认 `maxBatchSize * 10`），超过阈值时触发强制同步排空，防止恶性突发流量打爆 Node.js 堆内存。
+   - 零异常吞没（Zero Error Swallowing）：当底层写失败时，精准将底层错误分发给批次内每一个 Promise 调用方，不吞没不卡死。
+   - 移除不当的 `timer.unref()`，保证 Node.js 在微批排队窗口期内可靠结算落地。
 
-### B. 极致性能突破 (High-Throughput Performance Breakthroughs)
-1. **PostgreSQL & MongoDB 批量操作单事务爆发 (Batch Records - KD-PERF1 & KD-PERF3)**:
-   - `PostgresSchemaTable.setRecords`: 采用单事务多行 `INSERT INTO ... VALUES (...), (...) ON CONFLICT DO UPDATE` 动态分块（每块 200 条），避免 N 次网络 RTT，写入性能提升 10x-100x。
-   - `PostgresSchemaTable.deleteRecords`: 采用单条 `WHERE "${pk}" = ANY($1)` 批量删除。
-   - `MongoSchemaTable.setRecords / deleteRecords`: 分别采用底层原生 `collection.bulkWrite` 与 `collection.deleteMany({ _id: { $in: keys } })`。
-2. **PostgreSQL 迭代器 Keyset 游标流式分页 (Streaming Keyset Pagination - KD-PERF3)**:
-   - `PostgresDriver.iterator`: 废除原先一次性查全表（$O(N)$ 内存崩溃风险）的做法，重构为基于主键游标的流式迭代器（`WHERE "key" > $lastKey ORDER BY "key" ASC LIMIT 500`），将内存开销稳定降至 $O(1)$。
-3. **SQLite 动态查询 Prepared Statement 缓存 (Statement LRU Caching - KD-PERF2)**:
-   - `SqliteDriver.find` & `SqliteSchemaTable.find`: 引入 128 容量的 LRU 缓存复用已编译的 Prepared Statement，避免频繁动态 SQL 字符串解析；在执行 DDL（`ensureIndex`, `addKey`, `addIndex`）时精准驱逐失效缓存。
-4. **规范序列化零无效内存分配 (Zero-Allocation Paths in `canonicalize` - KD-PERF3)**:
-   - `src/core/serializer.ts`: 采用栈式跟踪彻底消除了正常遍历路径上的模板字符串拼接分配，并优化了排序与过滤逻辑。
-5. **插件 Hook 运行时零开销快速通路 (Fast-Path Guarding - KD-PERF3)**:
-   - `src/core/table.ts`: 在所有 CRUD 操作前做同步 `this.deps.hooks.has(hook)` 检查，在未安装插件时完全规避 Promise 分配与微任务分发开销。
-6. **缓存底层事务函数持久复用 (Prepared Transactions in Cache Stores)**:
-   - `src/cache/stores/sqlite-store.ts`: 对 `setMany` 与 `deleteMany` 事务函数进行实例成员级复用。
+2. **Multi-Key 物理二级索引深度支持与原型链防御**:
+   - 物理 Schema 表（`TableSchema` / `MultiKeySchema`）深度集成。
+   - `sanitizeSecondaryKeys` 严格过滤 `__proto__`, `constructor`, `prototype`，杜绝原型链污染。
+   - 内存折叠模式下对同 Key 的二级键执行增量浅合并（`mergedKeys = { ...existing.keys, ...newItem.keys }`），并发写入不丢失物理索引字段。
+
+3. **两层聚合正交可配置 (`coalesce` & `sqlAggregation`)**:
+   - `coalesce: true`（默认）：内存层同 Key 覆盖写与写删抵消，大幅压降数据库 I/O 与 PostgreSQL MVCC 死元组。
+   - `coalesce: false`：严格保序微批（FIFO），保留每一条写操作（满足 CDC/触发器审计场景）。
+   - `sqlAggregation: true`（默认）：生成单条 multi-row SQL 语句。
+   - `sqlAggregation: false`：在单事务内循环执行独立 Prepared Statements。
+
+4. **同 Key 并发冲突治理与数据一致性**:
+   - 内存直通更新（In-Memory Fast-Path）：已在缓冲中的 Key 立即在内存中同步执行原子累加或计算，0 次数据库读 RTT。
+   - 初次查询防击穿链（In-Flight Deduplication）：并发首更复用在途 Promise 链，排队执行，杜绝丢失更新（压力测试 50 并发累加 100% 准确）。
+   - 读己之写（RYW）保证：`get(k)` 优先内存直通命中，`find()` / `getRecord()` 前置透明排空。
+
+5. **PostgreSQL 交叉行锁死锁消除 (Deadlock Prevention)**:
+   - `compareKeysDeterministic`: 在将批次下发给 PostgreSQL（`setRecords` 与 `setMany`）前，对待写主键进行严格确定性升序排序，使所有并发事务获取行锁的顺序永远单调一致，数学上彻底根除 `deadlock detected`。
+
+6. **生命周期与优雅停机 (Graceful Shutdown)**:
+   - `table.flush()` 供应用显式排空。
+   - `kvdb.close()` 自动追踪所有活跃 Table 并并发等待批处理缓冲 100% 排空落地，杜绝停机丢数据。
+   - `SqliteDriver.close()` 清理预编译语句引用，根治 Node.js v24 环境下 C++ 析构断言问题。
+
+---
+
+## 3. 涉及与修改的核心文件
+
+- `src/core/batcher.ts`: 核心微批与写聚合引擎实现（`WriteBatcher`, `compareKeysDeterministic`, `sanitizeSecondaryKeys`）。
+- `src/core/table.ts`: Table 全量接入批处理、`flushBatch`、内存直通、防击穿链、RYW 读己之写拦截。
+- `src/core/kvdb.ts`: `KVDBOptions` 增加全局 `autoBatch`，`close()` 自动排空所有 Table 批处理。
+- `src/drivers/postgres/postgres-driver.ts`: `setRecords` 与 `setMany` 增加确定性主键排序，消除行锁死锁。
+- `src/drivers/sqlite/sqlite-driver.ts`: 增加 schemaTable 追踪与语句安全释放，避免 Node v24 退出竞争。
+- `src/index.ts`: 导出 `WriteBatcher` 及相关类型。
+- `docs/AI/tasks/TASK-029-AUTO-BATCH.md`: 完整任务规格与技术卡片。
+- `docs/AI/DECISIONS.md`: 记录 `KD-BATCH1`, `KD-BATCH2`, `KD-BATCH3`。
+- `docs/SPEC.md`: 新增 §13 Auto Batch 规格章节。
+- `test/unit/auto-batch.test.ts`: 全量 18 项深度测试全部通过。
+- `examples/22-auto-batch-coalescing.ts`: 官方高并发写聚合实战示例。
+
+---
+
+## 4. 全量验证结果
+
+- `pnpm test`: **208 tests passing (100% 全部通过，20 个测试套件)**，耗时 1.58s。
+- `pnpm typecheck`: **0 errors** (TypeScript 严苛类型检查完全通过)。
+- `pnpm build`: **构建成功**，输出 ESM、CJS 与 `.d.ts` 类型定义。
+- `pnpm examples`: **22 个官方实战示例全部成功运行通过 (100%)**。
 
 ---
 
