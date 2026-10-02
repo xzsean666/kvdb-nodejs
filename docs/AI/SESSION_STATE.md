@@ -64,44 +64,31 @@
 
 ---
 
-## 4. 全量验证结果
+## 4. 默认配置规范 (Zero-Config Default-On)
 
-- `pnpm test`: **208 tests passing (100% 全部通过，20 个测试套件)**，耗时 1.58s。
+按用户需求，KVDB 已默认开启 Auto Batch 微批合并与写聚合：
+- `DEFAULT_AUTOBATCH_OPTIONS`:
+  - `maxBatchSize: 50`: 50 条聚合阈值
+  - `maxWaitMs: 20`: 20ms 排空窗口
+  - `coalesce: true`: 内存折叠去重与 Multi-Key 增量浅合并
+  - `sqlAggregation: true`: 聚合单条 multi-row SQL / bulkWrite 降低往返
+  - `maxBufferSize: 500`: 10 倍缓冲背压防御
+- 支持通过 `new KVDB({ autoBatch: false })` 或 `db.table("ns", { autoBatch: false })` 显式禁用以回退至传统同步直写。
+
+---
+
+## 5. 全量验证结果
+
+- `pnpm test`: **208 tests passing (100% 全部通过，20 个测试套件)**，耗时 ~1.4s。
 - `pnpm typecheck`: **0 errors** (TypeScript 严苛类型检查完全通过)。
 - `pnpm build`: **构建成功**，输出 ESM、CJS 与 `.d.ts` 类型定义。
 - `pnpm examples`: **22 个官方实战示例全部成功运行通过 (100%)**。
 
 ---
 
-## 3. 涉及与修改的核心文件
-
-- `src/drivers/postgres/postgres-driver.ts`: 表名 ANSI 转义、`setRecords`/`deleteRecords` 批量 SQL 实现、Keyset 游标流式 `iterator`。
-- `src/drivers/mongodb/mongodb-driver.ts`: `MongoSchemaTable` 原生 `bulkWrite` 与 `deleteMany` 批处理支持。
-- `src/drivers/sqlite/sqlite-driver.ts`: `find` 动态语句 LRU 缓存与失效机制、事务函数持久化复用。
-- `src/drivers/postgres/dialect.ts` & `src/drivers/sqlite/dialect.ts`: 列标识符精准转义。
-- `src/core/table.ts`: `applyPatch` 原型链安全过滤、Hook 零开销快速通路、AutoIndex 异步化索引。
-- `src/query/parser.ts`: 原型链污染防御拦截、分页 `limit`/`offset` 非负安全整数断言。
-- `src/core/serializer.ts`: `canonicalize` 零无用内存分配重构。
-- `src/core/auto-index.ts`: `maxIndexed: 200` 容量硬上限防护。
-- `src/cache/stores/sqlite-store.ts`: ANSI 表名转义、过期索引、事务函数复用。
-- `test/unit/audit-security-performance.test.ts`: 新增 6 大全量安全与性能集成测试章节（Sections 13-18），共 23 项深度测试全部绿灯。
-- `docs/AI/DECISIONS.md`: 记录 `KD-SEC2`, `KD-PERF2`, `KD-PERF3` 架构与技术决策。
-- `docs/AI/TASK_INDEX.md`: 登记并闭环 `TASK-025-DEEP-AUDIT-HARDENING`。
-- `docs/AI/tasks/TASK-025-DEEP-AUDIT-HARDENING.md`: 完整任务规格与技术验收文档。
-
----
-
-## 4. 全量验证结果
-
-- `pnpm test`: **190 tests passing (100% 全部通过)**，耗时 1.17s。
-- `pnpm typecheck`: **0 errors** (TypeScript 严苛类型检查完全通过)。
-- `pnpm build`: **构建成功**，输出 ESM、CJS 与 `.d.ts` 类型定义。
-- `pnpm examples`: **21 个官方实战示例全部成功运行通过 (100%)**。
-
----
-
-## 5. 当前技术债务与后续展望
+## 6. 当前技术债务与后续展望
 
 1. **多驱动端到端环境测试 (Milestone 3)**:
    - SQLite 纯内存与真实磁盘文件测试全部 100% 覆盖。
    - PostgreSQL 与 MongoDB 驱动通过深度 Mock、AST 编译及结构断言测试。后续可在独立 CI/CD Docker 环境下执行外部容器端到端集成测试。
+

@@ -20,7 +20,7 @@ interface UserAccount {
   score: number;
 }
 
-interface UserKeys {
+interface UserKeys extends Record<string, unknown> {
   role: string;
   status: string;
 }

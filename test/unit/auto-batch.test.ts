@@ -212,7 +212,7 @@ describe("TASK-029: Auto Batch & Write Coalescing Engine", () => {
       name: string;
       level: number;
     }
-    interface UserKeys {
+    interface UserKeys extends Record<string, unknown> {
       role: string;
       status: string;
     }

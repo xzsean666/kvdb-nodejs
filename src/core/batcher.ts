@@ -42,6 +42,35 @@ export interface AutoBatchOptions {
   maxBufferSize?: number;
 }
 
+export const DEFAULT_AUTOBATCH_OPTIONS: Required<AutoBatchOptions> = {
+  maxBatchSize: 50,
+  maxWaitMs: 20,
+  coalesce: true,
+  sqlAggregation: true,
+  maxBufferSize: 500,
+};
+
+/**
+ * Resolves the effective autoBatch options, defaulting to enabled (DEFAULT_AUTOBATCH_OPTIONS)
+ * unless explicitly disabled (false).
+ */
+export function resolveAutoBatchOptions(
+  options?: boolean | AutoBatchOptions,
+  parentOptions?: boolean | AutoBatchOptions,
+): AutoBatchOptions | undefined {
+  if (options === false) return undefined;
+  if (options === undefined && parentOptions === false) return undefined;
+
+  const parent = typeof parentOptions === "object" ? parentOptions : {};
+  const local = typeof options === "object" ? options : {};
+
+  return {
+    ...DEFAULT_AUTOBATCH_OPTIONS,
+    ...parent,
+    ...local,
+  };
+}
+
 export type BatchOpType = "set" | "delete";
 
 export interface BatchSetItem<V = unknown> {

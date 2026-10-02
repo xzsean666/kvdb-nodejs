@@ -27,6 +27,7 @@ import type {
   TableIndexDefinition,
   MultiKeyIndexDefinition,
 } from "./table-schema.js";
+import { resolveAutoBatchOptions } from "./batcher.js";
 import type { AutoBatchOptions } from "./batcher.js";
 
 
@@ -108,7 +109,7 @@ export class KVDB {
     options: TableOptions<Columns> = {},
   ): Table<Value, Columns> {
     const cache = options.cache ? toCache(options.cache) : this.cache;
-    const autoBatch = options.autoBatch ?? this.autoBatch;
+    const autoBatch = resolveAutoBatchOptions(options.autoBatch, this.autoBatch);
     const tbl = new Table<Value, Columns>({
       getDriver: () => this.getDriver(),
       scope: { tablePrefix: this.tablePrefix, namespace },

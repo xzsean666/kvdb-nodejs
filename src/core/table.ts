@@ -30,7 +30,7 @@ import type {
 } from "./table-schema.js";
 import { validateColumnValues } from "./table-schema.js";
 import type { SchemaTableDriver } from "../drivers/types.js";
-import { WriteBatcher } from "./batcher.js";
+import { WriteBatcher, resolveAutoBatchOptions } from "./batcher.js";
 import type { AutoBatchOptions, BatchFlushPayload, BatchFlushResult } from "./batcher.js";
 
 
@@ -75,11 +75,10 @@ export interface TableDependencies {
 
 export class Table<Value = JsonValue, Columns extends Record<string, unknown> = Record<string, unknown>> {
   private readonly writeBatcher?: WriteBatcher<Value>;
-  private readonly inFlightUpdates = new Map<string, Promise<unknown>>();
 
   constructor(private readonly deps: TableDependencies) {
-    if (deps.autoBatch) {
-      const opts: AutoBatchOptions = typeof deps.autoBatch === "object" ? deps.autoBatch : {};
+    const opts = resolveAutoBatchOptions(deps.autoBatch);
+    if (opts) {
       this.writeBatcher = new WriteBatcher<Value>(
         async (payload) => this.flushBatch(payload),
         opts,
@@ -149,13 +148,9 @@ export class Table<Value = JsonValue, Columns extends Record<string, unknown> = 
       }
 
       if (payload.deletes.length > 0) {
-        if (schema.deleteRecords && payload.sqlAggregation) {
-          await schema.deleteRecords(payload.deletes as (string | number)[]);
-        } else {
-          for (const key of payload.deletes) {
-            const ok = await schema.delete(key);
-            if (ok) deletedKeys.add(key);
-          }
+        for (const key of payload.deletes) {
+          const ok = await schema.delete(key);
+          if (ok) deletedKeys.add(key);
         }
 
         if (this.deps.cache) {
@@ -214,13 +209,9 @@ export class Table<Value = JsonValue, Columns extends Record<string, unknown> = 
       const strKeys = payload.deletes.map(String);
       const physicalKeys = strKeys.map((k) => toPhysicalKey(this.deps.scope, k));
 
-      if (driver.deleteMany && payload.sqlAggregation) {
-        await driver.deleteMany(physicalKeys);
-      } else {
-        for (let i = 0; i < physicalKeys.length; i++) {
-          const ok = await driver.delete(physicalKeys[i]!);
-          if (ok) deletedKeys.add(payload.deletes[i]!);
-        }
+      for (let i = 0; i < physicalKeys.length; i++) {
+        const ok = await driver.delete(physicalKeys[i]!);
+        if (ok) deletedKeys.add(payload.deletes[i]!);
       }
 
       if (this.deps.cache) {
@@ -362,36 +353,10 @@ export class Table<Value = JsonValue, Columns extends Record<string, unknown> = 
         return written;
       }
 
-      // 2. Fetch with in-flight deduplication
-      let fetchPromise = this.inFlightUpdates.get(strKey) as Promise<Value | undefined> | undefined;
-      if (!fetchPromise) {
-        fetchPromise = this.get(key);
-        this.inFlightUpdates.set(strKey, fetchPromise as Promise<unknown>);
+      // If a batch flush is in flight, await it first to guarantee snapshot consistency
+      if (this.writeBatcher.isFlushingNow) {
+        await this.writeBatcher.flush();
       }
-
-      let currentVal: Value | undefined;
-      try {
-        currentVal = await fetchPromise;
-      } finally {
-        this.inFlightUpdates.delete(strKey);
-      }
-
-      // Recheck if concurrent update enqueued into writeBatcher while fetching
-      const recheckedPending = this.writeBatcher.getPending(key);
-      if (recheckedPending && recheckedPending.type === "set" && recheckedPending.item) {
-        currentVal = recheckedPending.item.value as Value;
-      }
-
-      if (currentVal === undefined) {
-        throw new KvdbError(
-          "QUERY",
-          `Cannot update key "${key}" in namespace "${this.deps.schemaName ?? this.namespace}": it does not exist`,
-        );
-      }
-
-      const written = applyPatch(currentVal, patch);
-      await this.set(key, written, options);
-      return written;
     }
     const schema = await this.schemaDriver();
     const cKey = this.cacheKey(strKey, Boolean(schema));
