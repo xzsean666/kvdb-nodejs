@@ -456,6 +456,16 @@ export class PostgresDriver implements Driver {
     return this.pool;
   }
 
+  async dropSchemaTable(name: string): Promise<void> {
+    const physical = schemaTableName(name);
+    await this.pool.query(`DROP TABLE IF EXISTS "${physical}" CASCADE`);
+    try {
+      await this.pool.query("DELETE FROM kvdb_schema_registry WHERE logical_name = $1", [name]);
+    } catch {
+      // Ignore if registry table does not exist
+    }
+  }
+
   async close(): Promise<void> {
     await this.pool.end();
   }

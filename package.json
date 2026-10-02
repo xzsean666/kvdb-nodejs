@@ -29,6 +29,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:compliance": "vitest run test/compliance",
+    "test:compliance:all": "bash scripts/run-docker-compliance.sh",
     "test:e2e": "vitest run test/e2e",
     "example": "tsx",
     "examples": "tsx examples/run-all.ts",

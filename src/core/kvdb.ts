@@ -190,6 +190,21 @@ export class KVDB {
     return w;
   }
 
+  /** Delete a physical schema table and its registry metadata. */
+  async dropTable(name: string): Promise<boolean> {
+    const table = this.tableCache.get(name);
+    if (table) {
+      await table.flush().catch(() => {});
+      this.tableCache.delete(name);
+    }
+    const driver = await this.getDriver();
+    if (driver.dropSchemaTable) {
+      await driver.dropSchemaTable(name);
+      return true;
+    }
+    return false;
+  }
+
   /** Delete all currently-expired entries across the backend; returns the count. */
   async purgeExpired(): Promise<number> {
     return (await this.getDriver()).purgeExpired();

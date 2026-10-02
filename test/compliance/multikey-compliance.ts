@@ -15,13 +15,30 @@ export function describeMultiKeyCompliance(label: string, makeDriver: MakeDriver
   describe(`Multi-Key Driver Compliance: ${label}`, () => {
     let driver: Driver;
 
+    const cleanupTables = async () => {
+      if (driver.dropSchemaTable) {
+        for (const tbl of [
+          "coexist_tbl",
+          "blocks_compliance",
+          "users_lookup",
+          "posts_evo",
+          "orders_filter",
+          "articles_clean",
+        ]) {
+          await driver.dropSchemaTable(tbl);
+        }
+      }
+    };
+
     beforeEach(async () => {
       driver = await makeDriver();
       await driver.clear();
+      await cleanupTables();
     });
 
     afterEach(async () => {
       await driver.clear();
+      await cleanupTables();
       await driver.close();
     });
 

@@ -372,6 +372,17 @@ export class MongoDriver implements Driver {
     return new MongoSchemaTable(this.db, collection, registry, collName, name, resolved);
   }
 
+  async dropSchemaTable(name: string): Promise<void> {
+    const collName = schemaCollectionName(name);
+    await this.db.collection(collName).drop().catch(() => {});
+    try {
+      const registry = this.db.collection<{ _id: string; schema_json: string }>("kvdb_schema_registry");
+      await registry.deleteOne({ _id: name });
+    } catch {
+      // Ignore if registry does not exist
+    }
+  }
+
   async close(): Promise<void> {
     await this.client.close();
   }
@@ -650,6 +661,13 @@ class MongoSchemaTable<Columns extends Record<string, unknown>> implements Schem
     const evolved = evolveSchemaAddKey(this.schema, name, definition);
     if (schemasEqual(this.schema, evolved)) return;
 
+    if (definition.default !== undefined) {
+      await this.collection.updateMany(
+        { [name]: { $exists: false } },
+        { $set: { [name]: definition.default } },
+      );
+    }
+
     if (definition.index) {
       const idxOpts = typeof definition.index === "object" ? definition.index : {};
       const idxName = idxOpts.name ?? `${this.physicalName}_${name}_idx`;
@@ -697,7 +715,7 @@ class MongoSchemaTable<Columns extends Record<string, unknown>> implements Schem
     for (const [name, definition] of Object.entries(this.secondaryKeys)) {
       const raw = doc[name];
       if (raw === undefined || raw === null) {
-        columns[name] = null;
+        columns[name] = raw === null ? null : (definition.default !== undefined ? definition.default : null);
       } else if (definition.type === "integer" || definition.type === "number") {
         columns[name] = Number(raw);
       } else if (definition.type === "boolean") {

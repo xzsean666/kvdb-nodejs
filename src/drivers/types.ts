@@ -134,7 +134,7 @@ export interface Driver extends KVStore {
   purgeExpired(): MaybePromise<number>;
 
   openSchemaTable?<Columns extends Record<string, unknown>>(name: string, schema?: TableSchema<Columns> | MultiKeySchema<Columns>): MaybePromise<SchemaTableDriver<JsonValue, Columns> | undefined>;
-
+  dropSchemaTable?(name: string): MaybePromise<void>;
 
   /** Native handle escape hatch (better-sqlite3 Database, pg Pool, Mongo Db). */
   raw(): unknown;

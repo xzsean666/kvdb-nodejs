@@ -432,6 +432,16 @@ class SqliteDriver implements Driver {
     return this.database;
   }
 
+  dropSchemaTable(name: string): void {
+    const physical = schemaTableName(name);
+    this.database.exec(`DROP TABLE IF EXISTS "${physical}"`);
+    try {
+      this.database.prepare("DELETE FROM kvdb_schema_registry WHERE logical_name = ?").run(name);
+    } catch {
+      // Ignore if registry table does not exist
+    }
+  }
+
   async close(): Promise<void> {
     this.queryStatements.clear();
     (this as any).statements = undefined;

@@ -58,9 +58,9 @@
 
 ### Milestone 3: 生产级验证与高级功能扩展 (当前进行中 ⏳)
 - [x] 高性能微批处理与写聚合子系统（Auto Batch & Write Coalescing，TASK-029 & TASK-030）
-- [ ] 生产级可靠任务队列子系统 (Queue Subsystem：原子租约、Visibility Timeout、指数退避重试、死信队列、全托管 Worker，TASK-028-QUEUE)
-- [ ] 查询级缓存（Query Cache：`find()` 结果缓存与写入自动失效，TASK-024）
-- [ ] 缓存前缀清理能力（`Cache.deleteByPrefix`，让 `Table.clear()` 级联清空对应缓存，TASK-025-CACHE）
+- [x] 生产级可靠任务队列子系统 (Queue Subsystem：原子租约、Visibility Timeout、指数退避重试、死信队列、全托管 Worker，TASK-028-QUEUE)
+- [x] 查询级缓存（Query Cache：`find()` 结果缓存与写入自动失效，TASK-024）
+- [x] 缓存前缀清理能力（`Cache.deleteByPrefix`，让 `Table.clear()` 级联清空对应缓存，TASK-025-CACHE）
 - [ ] 在 Docker / 真实环境中完成 PostgreSQL 与 MongoDB 端到端合规验证并回填测试状态（TASK-026）
 - [ ] 扩展后端支持：Redis 与 MySQL 驱动适配器（TASK-027）
 - [ ] SQL 后端对高级嵌套查询（如 `$elemMatch`）的原生/虚拟支持
