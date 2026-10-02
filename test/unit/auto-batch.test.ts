@@ -482,5 +482,127 @@ describe("TASK-029: Auto Batch & Write Coalescing Engine", () => {
       // Unrelated key reads instantly from storage/undefined without being blocked
       expect(await table.get("unrelated_key")).toBeUndefined();
     });
+
+    it("runs beforeRead and afterRead hooks on in-memory fast-path hits", async () => {
+      const hookEvents: string[] = [];
+      const hookedDb = new KVDB({
+        driver: "sqlite",
+        url: ":memory:",
+        plugins: [
+          {
+            name: "test-crypto-overlay",
+            setup(hooks) {
+              hooks.on("beforeWrite", async (ctx) => {
+                hookEvents.push(`beforeWrite:${ctx.key}`);
+                return { ...ctx, value: `CIPHER_${String(ctx.value)}` };
+              });
+              hooks.on("afterRead", async (ctx) => {
+                hookEvents.push(`afterRead:${ctx.key}`);
+                if (typeof ctx.value === "string" && ctx.value.startsWith("CIPHER_")) {
+                  return { ...ctx, value: ctx.value.slice(7) };
+                }
+                return ctx;
+              });
+            },
+          },
+        ],
+      });
+
+      const table = hookedDb.table<string>("crypto_table", {
+        autoBatch: { maxBatchSize: 10, maxWaitMs: 500 },
+      });
+
+      // Write into buffer (not flushed yet)
+      const p = table.set("secret", "top-secret-password");
+      await new Promise((r) => setTimeout(r, 10));
+      expect(table.pendingBatchCount).toBe(1);
+
+      // Fast-path read from in-memory overlay: MUST run afterRead to decrypt!
+      const fastVal = await table.get("secret");
+      expect(fastVal).toBe("top-secret-password");
+      expect(hookEvents).toContain("afterRead:secret");
+
+      await p;
+      await hookedDb.close();
+    });
+
+    it("respects TTL expiry on in-memory buffered items before flush", async () => {
+      const table = db.table<string>("ttl_in_memory", {
+        autoBatch: { maxBatchSize: 10, maxWaitMs: 500 },
+      });
+
+      // Enqueue item with very short TTL (30ms)
+      const p = table.set("tempKey", "fleeting", { ttlMs: 30 });
+      expect(table.pendingBatchCount).toBe(1);
+
+      // Read immediately before expiry
+      expect(await table.get("tempKey")).toBe("fleeting");
+      expect(await table.exists("tempKey")).toBe(true);
+
+      // Wait until TTL expires
+      await new Promise((r) => setTimeout(r, 40));
+
+      // In-memory read must report expired (undefined / false)
+      expect(await table.get("tempKey")).toBeUndefined();
+      expect(await table.exists("tempKey")).toBe(false);
+
+      await p;
+    });
+
+    it("enforces flush barrier before setMany() and deleteMany() to prevent write inversion", async () => {
+      const table = db.table<string>("reordering_guard", {
+        autoBatch: { maxBatchSize: 100, maxWaitMs: 500 },
+      });
+
+      // 1. set("k1", "v1") is enqueued in memory
+      const p1 = table.set("k1", "v1");
+      expect(table.pendingBatchCount).toBe(1);
+
+      // 2. setMany with same key must flush the prior set first
+      await table.setMany([{ key: "k1", value: "v2" }]);
+      expect(table.pendingBatchCount).toBe(0); // Flushed!
+      expect(await table.get("k1")).toBe("v2");
+
+      // 3. set("k2", "v3") in memory, then deleteMany(["k2"])
+      const p2 = table.set("k2", "v3");
+      expect(table.pendingBatchCount).toBe(1);
+
+      const delCount = await table.deleteMany(["k2"]);
+      expect(table.pendingBatchCount).toBe(0);
+      expect(delCount).toBe(1);
+      expect(await table.get("k2")).toBeUndefined();
+
+      await Promise.all([p1, p2]);
+    });
+
+    it("rejects both prior set caller and delete caller if batch flush fails during coalescence", async () => {
+      const failingBatcher = new WriteBatcher<string>(
+        async () => {
+          throw new Error("Batch commit failed");
+        },
+        { maxBatchSize: 10, maxWaitMs: 50, coalesce: true },
+      );
+
+      const pSet = failingBatcher.enqueue({ key: "k1", value: "val1" });
+      const pDel = failingBatcher.enqueueDelete("k1");
+
+      await expect(pSet).rejects.toThrow("Batch commit failed");
+      await expect(pDel).rejects.toThrow("Batch commit failed");
+    });
+
+    it("flushes all active tables when db.flush() is called", async () => {
+      const t1 = db.table<string>("multi_flush_1", { autoBatch: { maxBatchSize: 50, maxWaitMs: 500 } });
+      const t2 = db.table<string>("multi_flush_2", { autoBatch: { maxBatchSize: 50, maxWaitMs: 500 } });
+
+      void t1.set("a", "1");
+      void t2.set("b", "2");
+      expect(t1.pendingBatchCount).toBe(1);
+      expect(t2.pendingBatchCount).toBe(1);
+
+      await db.flush();
+
+      expect(t1.pendingBatchCount).toBe(0);
+      expect(t2.pendingBatchCount).toBe(0);
+    });
   });
 });

@@ -8,8 +8,8 @@
 ## 1. 核心状态概要
 
 - **当前 Goal**: 生产就绪度深度审计与工业级生产加固 (TASK-032-PRODUCTION-READY)
-- **当前 Task**: 审计隐患全面修复与生态终验
-- **当前状态**: **COMPLETED_AND_VERIFIED** (4 项 P0 阻断隐患、3 项 P1 稳定性短板、2 项 P2 安全与运维功能全部修复，261 项单测 100% 通过，149 项真实数据库容器合规测试 100% 绿灯全过，26 个官方示例全部无警告通过，构建产物由 1.99MB 瘦身至 218KB)
+- **当前 Task**: AutoBatch 深度隐患审计与边界一致性终验
+- **当前状态**: **COMPLETED_AND_VERIFIED** (4 项 P0 阻断隐患、3 项 P1 稳定性短板、2 项 P2 安全与运维功能，以及本次 AutoBatch 深度审计中的 7 项内存快路径、TTL漂移、写乱序与错误传播隐患全部修复完成。266 项单测 100% 通过，149 项真实数据库容器合规测试 100% 绿灯全过，26 个官方示例全部无警告通过，构建产物保持 222KB 轻量体积)
 
 ---
 
@@ -41,6 +41,23 @@
 5. **容器健康探测接口 (`src/core/kvdb.ts`)**:
    - 暴露 `await db.healthCheck()` 接口，直接提供 K8s Liveness / Readiness 探针集成。
 
+### C. AutoBatch 子系统深度加固 (本次专项)
+1. **内存快路径插件 Hook 穿透 (`src/core/table.ts`)**:
+   - 修复在命中 pendingMap 或 inFlightSnapshot 内存快路径时跳过 beforeRead/afterRead 的问题。加解密、审计等插件在微批缓冲窗口内读取时行为严格一致。
+2. **内存缓冲与排队期间的 TTL 零漂移保证 (`src/core/batcher.ts`, `src/core/table.ts`)**:
+   - 记录 `enqueuedAt`，`get()` 与 `exists()` 在读取内存缓冲时精确剔除已过期数据。
+   - 刷盘时动态计算 `effectiveTtl = item.ttlMs - elapsed`，消除高负载缓冲累积对 TTL 造成的时钟漂移。
+3. **批量写方法乱序与复活防范屏障 (`src/core/table.ts`)**:
+   - 在 `setMany()` 与 `deleteMany()` 前置加入 `writeBatcher.flush()` 屏障，防止先执行的离散写在后执行的批量写之后刷盘导致旧数据反向覆盖。
+4. **Set-Delete 折叠事务错误零吞没 (`src/core/batcher.ts`)**:
+   - 消除 `enqueueDelete()` 提前 resolve 被取消 set 的竞态；批处理失败时，所有涉及写操作的 Promise 同步 reject，杜绝虚假成功。
+5. **连续高频写下的 flush() 饥饿防范 (`src/core/batcher.ts`)**:
+   - `flush()` 判定条件重构为序列屏障 `while (this.completedSeq < targetSeq)`，保证在海量持续写入下当前批次提交即返回，杜绝无限死循环。
+6. **MySQL Schema Table 事务聚合与多行原子 UPSERT (`src/drivers/mysql/mysql-driver.ts`)**:
+   - `setRecords` 升级为 200 行分块的多行 `INSERT ... VALUES (...), (...) ON DUPLICATE KEY UPDATE`，并在单个连接事务中执行，引入主键确定性排序彻底杜绝死锁。
+7. **顶级实例全局刷盘支持 (`src/core/kvdb.ts`)**:
+   - 暴露 `await db.flush()`，一键同步刷新所有活跃表的内存缓冲区。
+
 ---
 
 ## 3. 全局里程碑达成状态
@@ -58,10 +75,10 @@
 # 1. 类型检查
 pnpm typecheck
 
-# 2. 打包构建 (产物大小 218KB)
+# 2. 打包构建 (产物大小 222KB)
 pnpm build
 
-# 3. 本地单元测试 (261 tests 全部通过)
+# 3. 本地单元测试 (266 tests 全部通过)
 pnpm test
 
 # 4. 全驱动真实数据库合规测试 (149 tests 跨 SQLite, Postgres, Mongo, Redis, MySQL)

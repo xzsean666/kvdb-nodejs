@@ -184,11 +184,14 @@ export class Table<Value = JsonValue, Columns extends Record<string, unknown> = 
         const recordsToSet = payload.sets.map((item) => {
           const rawKeys = item.keys;
           const columns = validateColumnValues(schema.schema, rawKeys);
+          const elapsed = Date.now() - (item.enqueuedAt ?? Date.now());
+          const effectiveTtl =
+            item.ttlMs !== undefined ? item.ttlMs - elapsed : undefined;
           return {
             key: item.key,
             value: serialize(item.value as JsonValue),
             columns,
-            ttlMs: item.ttlMs,
+            ttlMs: effectiveTtl,
           };
         });
 
@@ -202,10 +205,14 @@ export class Table<Value = JsonValue, Columns extends Record<string, unknown> = 
 
         if (this.deps.cache) {
           for (const item of payload.sets) {
+            if (this.writeBatcher?.hasPending(item.key)) continue;
+            const elapsed = Date.now() - (item.enqueuedAt ?? Date.now());
+            const effectiveTtl =
+              item.ttlMs !== undefined ? item.ttlMs - elapsed : undefined;
             await this.deps.cache.set(
               this.cacheKey(String(item.key), true),
               item.value,
-              item.ttlMs,
+              effectiveTtl,
             );
           }
         }
@@ -243,9 +250,12 @@ export class Table<Value = JsonValue, Columns extends Record<string, unknown> = 
       for (const op of payload.operations) {
         const pk = toPhysicalKey(this.deps.scope, String(op.key));
         if (op.type === "set" && op.item) {
-          await driver.set(pk, serialize(op.item.value as JsonValue), op.item.ttlMs);
+          const elapsed = Date.now() - (op.item.enqueuedAt ?? Date.now());
+          const effectiveTtl =
+            op.item.ttlMs !== undefined ? op.item.ttlMs - elapsed : undefined;
+          await driver.set(pk, serialize(op.item.value as JsonValue), effectiveTtl);
           if (this.deps.cache) {
-            await this.deps.cache.set(pk, op.item.value, op.item.ttlMs);
+            await this.deps.cache.set(pk, op.item.value, effectiveTtl);
           }
           if (this.deps.hooks.has("afterWrite")) {
             await this.deps.hooks.run("afterWrite", {
@@ -267,11 +277,16 @@ export class Table<Value = JsonValue, Columns extends Record<string, unknown> = 
     }
 
     if (payload.sets.length > 0) {
-      const entries = payload.sets.map((item) => ({
-        key: toPhysicalKey(this.deps.scope, String(item.key)),
-        value: serialize(item.value as JsonValue),
-        ttlMs: item.ttlMs,
-      }));
+      const entries = payload.sets.map((item) => {
+        const elapsed = Date.now() - (item.enqueuedAt ?? Date.now());
+        const effectiveTtl =
+          item.ttlMs !== undefined ? item.ttlMs - elapsed : undefined;
+        return {
+          key: toPhysicalKey(this.deps.scope, String(item.key)),
+          value: serialize(item.value as JsonValue),
+          ttlMs: effectiveTtl,
+        };
+      });
 
       if (driver.setMany && payload.sqlAggregation) {
         await driver.setMany(entries);
@@ -283,10 +298,14 @@ export class Table<Value = JsonValue, Columns extends Record<string, unknown> = 
 
       if (this.deps.cache) {
         for (const item of payload.sets) {
+          if (this.writeBatcher?.hasPending(item.key)) continue;
+          const elapsed = Date.now() - (item.enqueuedAt ?? Date.now());
+          const effectiveTtl =
+            item.ttlMs !== undefined ? item.ttlMs - elapsed : undefined;
           await this.deps.cache.set(
             toPhysicalKey(this.deps.scope, String(item.key)),
             item.value,
-            item.ttlMs,
+            effectiveTtl,
           );
         }
       }
@@ -642,50 +661,65 @@ export class Table<Value = JsonValue, Columns extends Record<string, unknown> = 
 
   async get(key: string | number): Promise<Value | undefined> {
     const strKey = String(key);
-    if (this.writeBatcher) {
-      const pending = this.writeBatcher.getPending(key);
-      if (pending) {
-        if (pending.type === "delete") return undefined;
-        if (pending.item) {
-          return safeClone(pending.item.value as Value);
-        }
-      }
-      const inFlight = this.writeBatcher.getInFlight(key);
-      if (inFlight) {
-        if (inFlight.type === "delete") return undefined;
-        if (inFlight.item) {
-          return safeClone(inFlight.item.value as Value);
-        }
-      }
-    }
-
     if (this.deps.hooks.has("beforeRead")) {
       await this.deps.hooks.run("beforeRead", { namespace: this.namespace, key: strKey, value: undefined });
     }
 
-    const schema = await this.schemaDriver();
-    const cKey = this.cacheKey(strKey, Boolean(schema));
     let value: Value | undefined;
-    const cached = this.deps.cache ? await this.deps.cache.get<Value>(cKey) : undefined;
-    if (cached !== undefined) {
-      value = cached;
-    } else if (schema) {
-      const record = await schema.getRecord(key);
-      if (record !== undefined) {
-        value = deserialize<Value>(record.value);
-        if (this.deps.cache) {
-          const remainingTtl = ttlFromExpiry(record.expiresAt);
-          await this.deps.cache.set(cKey, value, remainingTtl);
+    let handledInMemory = false;
+
+    if (this.writeBatcher) {
+      const pending = this.writeBatcher.getPending(key);
+      if (pending) {
+        handledInMemory = true;
+        if (pending.type === "set" && pending.item) {
+          const isExpired =
+            pending.item.ttlMs !== undefined &&
+            Date.now() - (pending.item.enqueuedAt ?? 0) >= pending.item.ttlMs;
+          if (!isExpired) {
+            value = safeClone(pending.item.value as Value);
+          }
+        }
+      } else {
+        const inFlight = this.writeBatcher.getInFlight(key);
+        if (inFlight) {
+          handledInMemory = true;
+          if (inFlight.type === "set" && inFlight.item) {
+            const isExpired =
+              inFlight.item.ttlMs !== undefined &&
+              Date.now() - (inFlight.item.enqueuedAt ?? 0) >= inFlight.item.ttlMs;
+            if (!isExpired) {
+              value = safeClone(inFlight.item.value as Value);
+            }
+          }
         }
       }
-    } else {
-      const driver = await this.deps.getDriver();
-      const entry = await driver.get(cKey);
-      if (entry !== undefined) {
-        value = deserialize<Value>(entry.value);
-        if (this.deps.cache) {
-          const remainingTtl = ttlFromExpiry(entry.expiresAt);
-          await this.deps.cache.set(cKey, value, remainingTtl);
+    }
+
+    if (!handledInMemory) {
+      const schema = await this.schemaDriver();
+      const cKey = this.cacheKey(strKey, Boolean(schema));
+      const cached = this.deps.cache ? await this.deps.cache.get<Value>(cKey) : undefined;
+      if (cached !== undefined) {
+        value = cached;
+      } else if (schema) {
+        const record = await schema.getRecord(key);
+        if (record !== undefined) {
+          value = deserialize<Value>(record.value);
+          if (this.deps.cache) {
+            const remainingTtl = ttlFromExpiry(record.expiresAt);
+            await this.deps.cache.set(cKey, value, remainingTtl);
+          }
+        }
+      } else {
+        const driver = await this.deps.getDriver();
+        const entry = await driver.get(cKey);
+        if (entry !== undefined) {
+          value = deserialize<Value>(entry.value);
+          if (this.deps.cache) {
+            const remainingTtl = ttlFromExpiry(entry.expiresAt);
+            await this.deps.cache.set(cKey, value, remainingTtl);
+          }
         }
       }
     }
@@ -727,11 +761,25 @@ export class Table<Value = JsonValue, Columns extends Record<string, unknown> = 
     if (this.writeBatcher) {
       const pending = this.writeBatcher.getPending(key);
       if (pending) {
-        return pending.type === "set";
+        if (pending.type === "delete") return false;
+        if (pending.type === "set") {
+          if (pending.item?.ttlMs !== undefined) {
+            const age = Date.now() - (pending.item.enqueuedAt ?? 0);
+            if (age >= pending.item.ttlMs) return false;
+          }
+          return true;
+        }
       }
       const inFlight = this.writeBatcher.getInFlight(key);
       if (inFlight) {
-        return inFlight.type === "set";
+        if (inFlight.type === "delete") return false;
+        if (inFlight.type === "set") {
+          if (inFlight.item?.ttlMs !== undefined) {
+            const age = Date.now() - (inFlight.item.enqueuedAt ?? 0);
+            if (age >= inFlight.item.ttlMs) return false;
+          }
+          return true;
+        }
       }
     }
     const schema = await this.schemaDriver();
@@ -784,6 +832,9 @@ export class Table<Value = JsonValue, Columns extends Record<string, unknown> = 
       columns?: Record<string, unknown>;
     }[],
   ): Promise<void> {
+    if (this.writeBatcher && (this.writeBatcher.pendingCount > 0 || this.writeBatcher.isFlushingNow)) {
+      await this.writeBatcher.flush();
+    }
     const schema = await this.schemaDriver();
     if (schema) {
       const recordsToSet = items.map((item) => {
@@ -843,6 +894,9 @@ export class Table<Value = JsonValue, Columns extends Record<string, unknown> = 
   }
 
   async deleteMany(keys: (string | number)[]): Promise<number> {
+    if (this.writeBatcher && (this.writeBatcher.pendingCount > 0 || this.writeBatcher.isFlushingNow)) {
+      await this.writeBatcher.flush();
+    }
     const schema = await this.schemaDriver();
     if (schema) {
       let count = 0;

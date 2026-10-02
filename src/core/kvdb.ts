@@ -258,6 +258,15 @@ export class KVDB {
     return (await this.getDriver()).raw();
   }
 
+  /**
+   * Immediately flushes all buffered writes across all active tables.
+   */
+  async flush(): Promise<void> {
+    await Promise.all(
+      Array.from(this.tableCache.values()).map((t) => t.flush()),
+    );
+  }
+
   async close(): Promise<void> {
     this.unregisterShutdownHooks();
     if (this.cleanupTimer !== undefined) {

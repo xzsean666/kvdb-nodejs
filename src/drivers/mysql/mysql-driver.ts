@@ -36,6 +36,7 @@ import {
   evolveSchemaAddIndex,
 } from "../../core/table-schema.js";
 import { expiresAtFromTtl } from "../../core/expiry.js";
+import { compareKeysDeterministic } from "../../core/batcher.js";
 
 export interface MysqlPoolOptions {
   connectionLimit?: number;
@@ -543,8 +544,55 @@ class MysqlSchemaTable<Columns extends Record<string, unknown>>
       ttlMs?: number;
     }>,
   ): Promise<void> {
-    for (const item of items) {
-      await this.setRecord(item.key, item.value, item.columns, item.ttlMs);
+    if (items.length === 0) return;
+    const sortedItems = items.length > 1
+      ? items.slice().sort((a, b) => compareKeysDeterministic(a.key, b.key))
+      : items;
+    const conn = await this.pool.getConnection();
+    try {
+      await conn.beginTransaction();
+      const pk = this.pkName;
+      const now = Date.now();
+      const cols = Object.keys(this.secondaryKeys);
+      const colNames = [pk, ...cols, "value", "expires_at", "created_at", "updated_at"];
+      const tuplePlaceholders = `(${colNames.map(() => "?").join(", ")})`;
+      const updates = [
+        ...cols.map((c) => `\`${c}\` = VALUES(\`${c}\`)`),
+        `\`value\` = VALUES(\`value\`)`,
+        `\`expires_at\` = VALUES(\`expires_at\`)`,
+        `\`updated_at\` = VALUES(\`updated_at\`)`,
+      ].join(", ");
+
+      const CHUNK_SIZE = 200;
+      for (let i = 0; i < sortedItems.length; i += CHUNK_SIZE) {
+        const chunk = sortedItems.slice(i, i + CHUNK_SIZE);
+        const allParams: unknown[] = [];
+        const tuples: string[] = [];
+
+        for (const item of chunk) {
+          tuples.push(tuplePlaceholders);
+          allParams.push(
+            item.key,
+            ...cols.map((name) => this.serializeColumnValue(name, item.columns[name])),
+            item.value,
+            expiresAtFromTtl(item.ttlMs, now) ?? null,
+            now,
+            now,
+          );
+        }
+
+        const sql = `INSERT INTO \`${this.table}\` (${colNames.map((c) => `\`${c}\``).join(", ")})
+         VALUES ${tuples.join(", ")}
+         ON DUPLICATE KEY UPDATE ${updates}`;
+
+        await conn.query(sql, allParams);
+      }
+      await conn.commit();
+    } catch (err) {
+      await conn.rollback();
+      throw err;
+    } finally {
+      conn.release();
     }
   }
 

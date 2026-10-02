@@ -76,6 +76,7 @@ export interface BatchSetItem<V = unknown> {
   value: V;
   keys?: Record<string, unknown>;
   ttlMs?: number;
+  enqueuedAt?: number;
 }
 
 export interface BatchOpItem<V = unknown> {
@@ -191,6 +192,7 @@ export class WriteBatcher<V = unknown> {
       const cleanItem: BatchSetItem<V> = {
         ...item,
         keys: sanitizedKeys,
+        enqueuedAt: item.enqueuedAt ?? Date.now(),
       };
 
       if (this.coalesceEnabled) {
@@ -207,6 +209,7 @@ export class WriteBatcher<V = unknown> {
             ...cleanItem,
             keys: mergedKeys,
             ttlMs: cleanItem.ttlMs !== undefined ? cleanItem.ttlMs : existing.item?.ttlMs,
+            enqueuedAt: cleanItem.enqueuedAt,
           };
           existing.resolves.push(resolve);
           existing.rejects.push(reject);
@@ -251,15 +254,15 @@ export class WriteBatcher<V = unknown> {
         if (existing) {
           if (existing.type === "set") {
             const hadPriorSet = true;
-            // Resolve previous set callers because their write was cancelled by this delete
-            for (const prevResolve of existing.resolves) {
-              prevResolve();
-            }
+            const prevResolves = existing.resolves;
             existing.type = "delete";
             existing.item = undefined;
             existing.hadPriorSetInSameWindow = hadPriorSet;
-            existing.resolves = [(delResult?: boolean) => resolve(delResult ?? true)];
-            existing.rejects = [reject];
+            existing.resolves = [
+              ...prevResolves.map((r) => () => r()),
+              (delResult?: boolean) => resolve(delResult ?? true),
+            ];
+            existing.rejects.push(reject);
           } else {
             // Already a pending delete; append resolution handler instead of resolving early!
             existing.resolves.push((delResult?: boolean) => resolve(delResult ?? false));
@@ -378,7 +381,7 @@ export class WriteBatcher<V = unknown> {
       return;
     }
 
-    while (this.pendingCount > 0 || (this.activeFlushPromise && this.completedSeq < targetSeq)) {
+    while (this.completedSeq < targetSeq) {
       if (!this.activeFlushPromise) {
         this.activeFlushPromise = this.executeFlush();
       }
@@ -497,6 +500,7 @@ export class WriteBatcher<V = unknown> {
 
     this.pendingMap.clear();
     this.pendingList = [];
+    this.completedSeq = this.currentSeq;
 
     for (const op of items) {
       for (const rej of op.rejects) {
