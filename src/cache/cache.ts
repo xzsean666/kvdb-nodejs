@@ -100,6 +100,33 @@ export class Cache {
     return results.some(Boolean);
   }
 
+  async deleteByPrefix(prefix: string): Promise<number> {
+    const results = await Promise.all(
+      this.stores.map(async (store) => {
+        if (store.deleteByPrefix) {
+          return store.deleteByPrefix(prefix);
+        }
+        if (store.iterator) {
+          const keys: string[] = [];
+          for await (const [key] of store.iterator(prefix)) {
+            keys.push(key);
+          }
+          if (keys.length === 0) return 0;
+          if (store.deleteMany) {
+            return store.deleteMany(keys);
+          }
+          let count = 0;
+          for (const k of keys) {
+            if (await store.delete(k)) count++;
+          }
+          return count;
+        }
+        return 0;
+      }),
+    );
+    return Math.max(0, ...results);
+  }
+
   async clear(): Promise<void> {
     await Promise.all(this.stores.map((store) => store.clear()));
   }

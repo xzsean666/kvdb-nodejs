@@ -34,8 +34,8 @@
 | **TASK-022** | 动态多键使用规范、示例与文档发布 | M2 | **DONE** | TASK-021 | `docs/SPEC.md`, `examples/*` |
 | **TASK-023-AUDIT** | 全面安全/性能/逻辑审计与生产级修复及文档升级 | M2+ | **DONE** | TASK-022 | `src/*`, `test/unit/audit-*`, `docs/*` |
 | **TASK-025-DEEP-AUDIT-HARDENING** | 全面安全漏洞修复与极端性能瓶颈突破 | M2+ | **DONE** | TASK-023-AUDIT | `src/*`, `test/unit/*` |
-| **TASK-024** | 查询结果缓存 (Query Cache + Write Invalidation) | M3 | **TODO** | TASK-020 | `src/core/table.ts`, `src/cache/*` |
-| **TASK-025-CACHE** | Cache 前缀清理能力 (deleteByPrefix) | M3 | **TODO** | TASK-004 | `src/cache/*` |
+| **TASK-024** | 查询结果缓存 (Query Cache + Write Invalidation) | M3 | **DONE** | TASK-020 | `src/core/table.ts`, `src/cache/*` |
+| **TASK-025-CACHE** | Cache 前缀清理能力 (deleteByPrefix) | M3 | **DONE** | TASK-004 | `src/cache/*` |
 | **TASK-026** | PostgreSQL 与 MongoDB 真实 Docker 环境合规验证 | M3 | **TODO** | TASK-008, 021 | `test/compliance/*` |
 | **TASK-027** | Redis 与 MySQL 驱动扩展 | M3 | **TODO** | TASK-007 | `src/drivers/*` |
 | **TASK-028-QUEUE** | 生产级可靠任务队列子系统 (Queue Subsystem) | M3 | **DONE** | TASK-020 | `src/queue/*`, `src/core/kvdb.ts` |
@@ -46,8 +46,8 @@
 
 ## 2. 状态流转总览
 
-- **已完成 (DONE)**: TASK-001 ~ TASK-022, TASK-023-AUDIT, TASK-025-DEEP-AUDIT-HARDENING, TASK-028-QUEUE, TASK-029-AUTO-BATCH, TASK-031-SECURITY-PERF-HARDENING (27 项，已交付验证；历史任务卡片归档于 `docs/AI/tasks/completed/`)
-- **后续规划 (TODO)**: TASK-024 (查询缓存), TASK-025-CACHE (前缀清理), TASK-026 (Docker 合规), TASK-027 (Redis/MySQL 驱动扩展)
+- **已完成 (DONE)**: TASK-001 ~ TASK-022, TASK-023-AUDIT, TASK-025-DEEP-AUDIT-HARDENING, TASK-024, TASK-025-CACHE, TASK-028-QUEUE, TASK-029-AUTO-BATCH, TASK-031-SECURITY-PERF-HARDENING (29 项，已交付验证；历史任务卡片归档于 `docs/AI/tasks/completed/`)
+- **后续规划 (TODO)**: TASK-026 (Docker 合规), TASK-027 (Redis/MySQL 驱动扩展)
 - **待审查/验证中 (REVIEW)**: 0 项
 - **进行中 (IN_PROGRESS)**: 0 项
 - **已阻塞 (BLOCKED)**: 0 项
@@ -63,9 +63,9 @@
 - **Milestone 3**:
   - [x] TASK-029-AUTO-BATCH: 高性能微批处理与写聚合子系统 (DONE)
   - [x] TASK-031-SECURITY-PERF-HARDENING: 全面安全漏洞修复与架构性能深度优化 (DONE)
-  - [ ] TASK-028-QUEUE: 生产级可靠任务队列子系统 (TODO - 规格已就绪)
-  - [ ] TASK-024: 查询结果缓存 (Query Cache + Invalidation)
-  - [ ] TASK-025-CACHE: Cache 前缀清理能力 (deleteByPrefix)
+  - [x] TASK-028-QUEUE: 生产级可靠任务队列子系统 (DONE)
+  - [x] TASK-024: 查询结果缓存 (Query Cache + Invalidation) (DONE)
+  - [x] TASK-025-CACHE: Cache 前缀清理能力 (deleteByPrefix) (DONE)
   - [ ] TASK-026: PostgreSQL 与 MongoDB 真实 Docker 环境合规验证
   - [ ] TASK-027: Redis 与 MySQL 驱动扩展
 

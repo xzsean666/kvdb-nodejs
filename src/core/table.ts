@@ -57,6 +57,11 @@ export interface SetOptions<Columns = Record<string, unknown>> {
  */
 export type UpdatePatch<Value> = Partial<Value> | ((current: Value) => Value);
 
+export interface QueryCacheOptions {
+  enabled?: boolean;
+  ttlMs?: number;
+}
+
 export interface TableDependencies {
   /** Resolve the lazily-connected driver. */
   getDriver: () => Promise<Driver>;
@@ -71,11 +76,16 @@ export interface TableDependencies {
   schema?: TableSchema | MultiKeySchema;
   /** Optional micro-batch and coalescing options. */
   autoBatch?: boolean | AutoBatchOptions;
+  /** Query result caching configuration. */
+  queryCache?: boolean | QueryCacheOptions;
 }
 
 export class Table<Value = JsonValue, Columns extends Record<string, unknown> = Record<string, unknown>> {
   private readonly writeBatcher?: WriteBatcher<Value>;
   private readonly autoBatchOptions?: AutoBatchOptions;
+  private readonly queryCacheEnabled: boolean;
+  private readonly queryCacheTtlMs?: number;
+  private readonly queryCachePrefix: string;
 
   constructor(private readonly deps: TableDependencies) {
     const opts = resolveAutoBatchOptions(deps.autoBatch);
@@ -85,6 +95,21 @@ export class Table<Value = JsonValue, Columns extends Record<string, unknown> = 
         async (payload) => this.flushBatch(payload),
         opts,
       );
+    }
+    this.queryCachePrefix = `_qc:${this.namespace}:`;
+    if (typeof deps.queryCache === "boolean") {
+      this.queryCacheEnabled = deps.queryCache;
+    } else if (deps.queryCache && typeof deps.queryCache === "object") {
+      this.queryCacheEnabled = deps.queryCache.enabled ?? true;
+      this.queryCacheTtlMs = deps.queryCache.ttlMs;
+    } else {
+      this.queryCacheEnabled = false;
+    }
+  }
+
+  private async invalidateQueryCache(): Promise<void> {
+    if (this.queryCacheEnabled && this.deps.cache) {
+      await this.deps.cache.deleteByPrefix(this.queryCachePrefix);
     }
   }
 
@@ -106,6 +131,12 @@ export class Table<Value = JsonValue, Columns extends Record<string, unknown> = 
   }
 
   private async flushBatch(payload: BatchFlushPayload<Value>): Promise<BatchFlushResult | void> {
+    const result = await this.executeFlushBatch(payload);
+    await this.invalidateQueryCache();
+    return result;
+  }
+
+  private async executeFlushBatch(payload: BatchFlushPayload<Value>): Promise<BatchFlushResult | void> {
     const schema = await this.schemaDriver();
     const deletedKeys = new Set<string | number>();
     const isSequential =
@@ -362,6 +393,7 @@ export class Table<Value = JsonValue, Columns extends Record<string, unknown> = 
       if (this.deps.hooks.has("afterWrite")) {
         await this.deps.hooks.run("afterWrite", before);
       }
+      await this.invalidateQueryCache();
       return;
     }
 
@@ -371,6 +403,7 @@ export class Table<Value = JsonValue, Columns extends Record<string, unknown> = 
     if (this.deps.hooks.has("afterWrite")) {
       await this.deps.hooks.run("afterWrite", before);
     }
+    await this.invalidateQueryCache();
   }
 
   /**
@@ -473,6 +506,7 @@ export class Table<Value = JsonValue, Columns extends Record<string, unknown> = 
           ttlMs: writtenTtl,
         });
       }
+      await this.invalidateQueryCache();
       return written;
     }
 
@@ -509,6 +543,7 @@ export class Table<Value = JsonValue, Columns extends Record<string, unknown> = 
         ttlMs: writtenTtl,
       });
     }
+    await this.invalidateQueryCache();
     return written;
   }
 
@@ -582,11 +617,17 @@ export class Table<Value = JsonValue, Columns extends Record<string, unknown> = 
     const schema = await this.schemaDriver();
     const cKey = this.cacheKey(strKey, Boolean(schema));
     if (this.deps.cache) await this.deps.cache.delete(cKey);
+    let ok = false;
     if (schema) {
-      return schema.delete(key);
+      ok = await schema.delete(key);
+    } else {
+      const driver = await this.deps.getDriver();
+      ok = await driver.delete(cKey);
     }
-    const driver = await this.deps.getDriver();
-    return driver.delete(cKey);
+    if (ok) {
+      await this.invalidateQueryCache();
+    }
+    return ok;
   }
 
   async exists(key: string | number): Promise<boolean> {
@@ -614,10 +655,12 @@ export class Table<Value = JsonValue, Columns extends Record<string, unknown> = 
     const schema = await this.schemaDriver();
     if (schema) {
       await schema.clear();
+      await this.invalidateQueryCache();
       return;
     }
     const driver = await this.deps.getDriver();
     await driver.deleteByPrefix(namespacePrefix(this.deps.scope));
+    await this.invalidateQueryCache();
   }
 
   async getMany(keys: (string | number)[]): Promise<(Value | undefined)[]> {
@@ -678,6 +721,7 @@ export class Table<Value = JsonValue, Columns extends Record<string, unknown> = 
           ),
         );
       }
+      await this.invalidateQueryCache();
       return;
     }
     const driver = await this.deps.getDriver();
@@ -702,6 +746,7 @@ export class Table<Value = JsonValue, Columns extends Record<string, unknown> = 
         ),
       );
     }
+    await this.invalidateQueryCache();
   }
 
   async deleteMany(keys: (string | number)[]): Promise<number> {
@@ -720,6 +765,9 @@ export class Table<Value = JsonValue, Columns extends Record<string, unknown> = 
           keys.map((key) => this.deps.cache!.delete(this.cacheKey(String(key), true))),
         );
       }
+      if (count > 0) {
+        await this.invalidateQueryCache();
+      }
       return count;
     }
     const driver = await this.deps.getDriver();
@@ -733,6 +781,9 @@ export class Table<Value = JsonValue, Columns extends Record<string, unknown> = 
         );
     if (this.deps.cache) {
       await Promise.all(physicalKeys.map((key) => this.deps.cache!.delete(key)));
+    }
+    if (count > 0) {
+      await this.invalidateQueryCache();
     }
     return count;
   }
@@ -769,13 +820,29 @@ export class Table<Value = JsonValue, Columns extends Record<string, unknown> = 
       );
     }
     const driver = await this.deps.getDriver();
-    return driver.deleteByPrefix(toPhysicalPrefix(this.deps.scope, prefix));
+    const count = await driver.deleteByPrefix(toPhysicalPrefix(this.deps.scope, prefix));
+    if (count > 0) {
+      await this.invalidateQueryCache();
+    }
+    return count;
   }
 
   async find(query: FindQuery = {}): Promise<{ key: string; value: Value }[]> {
     if (this.writeBatcher && (this.writeBatcher.pendingCount > 0 || this.writeBatcher.isFlushingNow)) {
       await this.writeBatcher.flush();
     }
+    const qKey = this.queryCacheEnabled && this.deps.cache
+      ? `${this.queryCachePrefix}find:${canonicalQueryString(query)}`
+      : undefined;
+
+    if (qKey && this.deps.cache) {
+      const cached = await this.deps.cache.get<{ key: string; value: Value }[]>(qKey);
+      if (cached !== undefined) {
+        return cached;
+      }
+    }
+
+    let result: { key: string; value: Value }[];
     const schema = await this.schemaDriver();
     if (schema) {
       const mergedWhere = {
@@ -785,77 +852,102 @@ export class Table<Value = JsonValue, Columns extends Record<string, unknown> = 
       const whereNode = parseSchemaWhere(mergedWhere, schema.schema);
       const findOpts = parseFindOptions(query, schema.schema);
       const rows = await schema.find(whereNode, findOpts);
-      return rows.map((row) => ({ key: String(row.key), value: deserialize<Value>(row.value) }));
-    }
-
-    const driver = await this.deps.getDriver();
-    const whereParsed = parseWhere(query.where);
-    const findOpts = parseFindOptions(query);
-    const parsed = this.deps.hooks.has("beforeQuery")
-      ? await this.deps.hooks.run("beforeQuery", {
-          namespace: this.namespace,
-          where: whereParsed,
-          options: findOpts,
-        })
-      : {
-          namespace: this.namespace,
-          where: whereParsed,
-          options: findOpts,
-        };
-    const entries = await driver.find(
-      parsed.where,
-      parsed.options,
-      namespacePrefix(this.deps.scope),
-    );
-    if (this.deps.hooks.has("afterQuery")) {
-      await this.deps.hooks.run("afterQuery", parsed);
-    }
-
-    if (this.deps.autoIndex) {
-      const paths = collectFieldPaths(parsed.where, parsed.options?.sort);
-      const scopedPaths = paths.map((path) => `${this.namespace}::${path}`);
-      const toIndex = this.deps.autoIndex.record(scopedPaths);
-      if (toIndex.length > 0) {
-        void Promise.all(
-          toIndex.map((scopedPath) => {
-            const path = scopedPath.slice(this.namespace.length + 2);
-            return Promise.resolve(driver.ensureIndex(path)).catch(() => {});
-          }),
-        );
-
+      result = rows.map((row) => ({ key: String(row.key), value: deserialize<Value>(row.value) }));
+    } else {
+      const driver = await this.deps.getDriver();
+      const whereParsed = parseWhere(query.where);
+      const findOpts = parseFindOptions(query);
+      const parsed = this.deps.hooks.has("beforeQuery")
+        ? await this.deps.hooks.run("beforeQuery", {
+            namespace: this.namespace,
+            where: whereParsed,
+            options: findOpts,
+          })
+        : {
+            namespace: this.namespace,
+            where: whereParsed,
+            options: findOpts,
+          };
+      const entries = await driver.find(
+        parsed.where,
+        parsed.options,
+        namespacePrefix(this.deps.scope),
+      );
+      if (this.deps.hooks.has("afterQuery")) {
+        await this.deps.hooks.run("afterQuery", parsed);
       }
+
+      if (this.deps.autoIndex) {
+        const paths = collectFieldPaths(parsed.where, parsed.options?.sort);
+        const scopedPaths = paths.map((path) => `${this.namespace}::${path}`);
+        const toIndex = this.deps.autoIndex.record(scopedPaths);
+        if (toIndex.length > 0) {
+          void Promise.all(
+            toIndex.map((scopedPath) => {
+              const path = scopedPath.slice(this.namespace.length + 2);
+              return Promise.resolve(driver.ensureIndex(path)).catch(() => {});
+            }),
+          );
+        }
+      }
+      result = entries.map((entry) => ({
+        key: toUserKey(this.deps.scope, entry.key),
+        value: deserialize<Value>(entry.value),
+      }));
     }
-    return entries.map((entry) => ({
-      key: toUserKey(this.deps.scope, entry.key),
-      value: deserialize<Value>(entry.value),
-    }));
+
+    if (qKey && this.deps.cache) {
+      await this.deps.cache.set(qKey, result, this.queryCacheTtlMs);
+    }
+    return result;
   }
 
 
   async findRecords(query: FindQuery = {}): Promise<PhysicalRecord<Columns, Value>[]> {
+    if (this.writeBatcher && (this.writeBatcher.pendingCount > 0 || this.writeBatcher.isFlushingNow)) {
+      await this.writeBatcher.flush();
+    }
+    const qKey = this.queryCacheEnabled && this.deps.cache
+      ? `${this.queryCachePrefix}records:${canonicalQueryString(query)}`
+      : undefined;
+
+    if (qKey && this.deps.cache) {
+      const cached = await this.deps.cache.get<PhysicalRecord<Columns, Value>[]>(qKey);
+      if (cached !== undefined) {
+        return cached;
+      }
+    }
+
+    let records: PhysicalRecord<Columns, Value>[];
     const schema = await this.schemaDriver();
     if (!schema) {
       const items = await this.find(query);
-      return items.map((item) => ({
+      records = items.map((item) => ({
         key: item.key as any,
         columns: {} as Partial<Columns>,
         keys: {} as Partial<Columns>,
         value: item.value,
       }));
+    } else {
+      const mergedWhere = {
+        ...(query.where ?? {}),
+        ...(query.columns ? { columns: query.columns } : {}),
+      };
+      const whereNode = parseSchemaWhere(mergedWhere, schema.schema);
+      const findOpts = parseFindOptions(query, schema.schema);
+      const rows = await schema.find(whereNode, findOpts);
+      records = rows.map((row) => ({
+        key: row.key as any,
+        columns: row.columns as Partial<Columns>,
+        keys: row.columns as Partial<Columns>,
+        value: deserialize<Value>(row.value),
+      }));
     }
-    const mergedWhere = {
-      ...(query.where ?? {}),
-      ...(query.columns ? { columns: query.columns } : {}),
-    };
-    const whereNode = parseSchemaWhere(mergedWhere, schema.schema);
-    const findOpts = parseFindOptions(query, schema.schema);
-    const rows = await schema.find(whereNode, findOpts);
-    return rows.map((row) => ({
-      key: row.key as any,
-      columns: row.columns as Partial<Columns>,
-      keys: row.columns as Partial<Columns>,
-      value: deserialize<Value>(row.value),
-    }));
+
+    if (qKey && this.deps.cache) {
+      await this.deps.cache.set(qKey, records, this.queryCacheTtlMs);
+    }
+    return records;
   }
 
   async getRecord(key: string | number): Promise<PhysicalRecord<Columns, Value> | undefined> {
@@ -997,3 +1089,18 @@ function safeClone<T>(val: T): T {
   }
   return deserialize<T>(serialize(val as JsonValue));
 }
+
+function canonicalQueryString(query: FindQuery): string {
+  return JSON.stringify(sortObject(query as unknown));
+}
+
+function sortObject(val: unknown): unknown {
+  if (val === null || typeof val !== "object") return val;
+  if (Array.isArray(val)) return val.map(sortObject);
+  const out: Record<string, unknown> = {};
+  for (const k of Object.keys(val as Record<string, unknown>).sort()) {
+    out[k] = sortObject((val as Record<string, unknown>)[k]);
+  }
+  return out;
+}
+

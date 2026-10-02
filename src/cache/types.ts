@@ -42,6 +42,8 @@ export interface KVStore {
   getMany?(keys: string[]): MaybePromise<(RawEntry | undefined)[]>;
   setMany?(entries: KVEntry[]): MaybePromise<void>;
   deleteMany?(keys: string[]): MaybePromise<number>;
+  /** Delete all entries whose key starts with `prefix`. Returns deleted count. */
+  deleteByPrefix?(prefix: string): MaybePromise<number>;
 
   /** Iterate entries, optionally restricted to keys starting with `prefix`. */
   iterator?(prefix?: string): AsyncGenerator<[string, RawEntry]>;

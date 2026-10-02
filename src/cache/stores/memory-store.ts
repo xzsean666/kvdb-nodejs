@@ -46,6 +46,16 @@ export class MemoryStore implements KVStore {
     this.entries.clear();
   }
 
+  deleteByPrefix(prefix: string): number {
+    let count = 0;
+    for (const key of Array.from(this.entries.keys())) {
+      if (key.startsWith(prefix)) {
+        if (this.entries.delete(key)) count++;
+      }
+    }
+    return count;
+  }
+
   async *iterator(prefix?: string): AsyncGenerator<[string, RawEntry]> {
     const now = Date.now();
     for (const [key, entry] of this.entries.entries()) {

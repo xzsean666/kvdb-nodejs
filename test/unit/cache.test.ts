@@ -116,4 +116,38 @@ describe("Cache", () => {
       });
     });
   });
+
+  describe("deleteByPrefix", () => {
+    it("deletes matching keys across stores and preserves non-matching keys", async () => {
+      const cache = new Cache({ stores: ["memory", "sqlite-memory"] });
+      await cache.set("user:1", { name: "Alice" });
+      await cache.set("user:2", { name: "Bob" });
+      await cache.set("order:1", { total: 100 });
+      await cache.set("user_special", { note: "should not be deleted by user:" });
+
+      const deletedCount = await cache.deleteByPrefix("user:");
+      expect(deletedCount).toBe(2);
+
+      expect(await cache.get("user:1")).toBeUndefined();
+      expect(await cache.get("user:2")).toBeUndefined();
+      expect(await cache.get("order:1")).toEqual({ total: 100 });
+      expect(await cache.get("user_special")).toEqual({ note: "should not be deleted by user:" });
+    });
+
+    it("safely escapes wildcards and returns 0 when no keys match", async () => {
+      const cache = new Cache({ stores: ["memory", "sqlite-memory"] });
+      await cache.set("a%b", 1);
+      await cache.set("a_b", 2);
+      await cache.set("axb", 3);
+
+      // Deleting prefix "a%" should only delete "a%b", not "a_b" or "axb"
+      const deleted = await cache.deleteByPrefix("a%");
+      expect(deleted).toBe(1);
+      expect(await cache.get("a%b")).toBeUndefined();
+      expect(await cache.get("a_b")).toBe(2);
+      expect(await cache.get("axb")).toBe(3);
+
+      expect(await cache.deleteByPrefix("nonexistent:")).toBe(0);
+    });
+  });
 });

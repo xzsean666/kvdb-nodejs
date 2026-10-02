@@ -9,7 +9,7 @@ export { KVDB } from "./core/kvdb.js";
 export type { KVDBOptions, KVDBDriverName, TableOptions, AlterTableOptions } from "./core/kvdb.js";
 
 export { Table } from "./core/table.js";
-export type { FindQuery, SetOptions } from "./core/table.js";
+export type { FindQuery, SetOptions, QueryCacheOptions } from "./core/table.js";
 
 // Driver contracts and the SQLite driver (for custom drivers / direct use).
 export type {

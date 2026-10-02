@@ -132,6 +132,14 @@ export class SqliteCacheStore implements KVStore {
     return this.deleteAll(keys);
   }
 
+  deleteByPrefix(prefix: string): number {
+    const escaped = `${escapeLike(prefix)}%`;
+    const stmt = this.database.prepare(
+      `DELETE FROM "${this.table}" WHERE key LIKE ? ESCAPE '\\'`,
+    );
+    return stmt.run(escaped).changes;
+  }
+
   async *iterator(prefix?: string): AsyncGenerator<[string, RawEntry]> {
     const now = Date.now();
     const where =

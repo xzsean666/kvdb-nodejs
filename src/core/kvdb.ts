@@ -77,6 +77,8 @@ export interface TableOptions<Columns extends Record<string, unknown> = Record<s
   schema?: TableSchema<Columns> | MultiKeySchema<Columns> | TableSchema<any> | MultiKeySchema<any>;
   /** Per-table micro-batch write & coalescing configuration (overrides global). */
   autoBatch?: boolean | AutoBatchOptions;
+  /** Query result caching configuration. */
+  queryCache?: boolean | import("./table.js").QueryCacheOptions;
 }
 
 export interface AlterTableOptions {
@@ -138,6 +140,7 @@ export class KVDB {
       schemaName: namespace,
       schema: options.schema,
       autoBatch,
+      queryCache: options.queryCache,
     });
     this.tableCache.set(namespace, tbl);
     return tbl;
