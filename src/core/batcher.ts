@@ -345,7 +345,6 @@ export class WriteBatcher<V = unknown> {
         this.timer = null;
         void this.triggerFlush();
       }, this.maxWaitMs);
-      this.timer.unref?.();
     }
   }
 
@@ -478,7 +477,6 @@ export class WriteBatcher<V = unknown> {
             this.timer = null;
             void this.triggerFlush();
           }, this.maxWaitMs);
-          this.timer.unref?.();
         }
       }
     }

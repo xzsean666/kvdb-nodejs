@@ -225,8 +225,10 @@ export function validateKeyValues(
   const input = keys ?? {};
   const schemaKeys = schema.keys ?? schema.columns ?? {};
 
+  const cleanResult: Record<string, unknown> = {};
+
   for (const key of Object.keys(input)) {
-    if (!(key in schemaKeys)) {
+    if (!Object.prototype.hasOwnProperty.call(schemaKeys, key)) {
       throw new KvdbSchemaError(`Unknown key: ${key}`);
     }
   }
@@ -243,15 +245,16 @@ export function validateKeyValues(
       if (definition.nullable !== true) {
         throw new KvdbSchemaError(`Key "${name}" is not nullable`);
       }
+      cleanResult[name] = null;
       continue;
     }
     if (!matchesType(value, definition.type)) {
       throw new KvdbSchemaError(`Invalid value for key "${name}" (expected ${definition.type}, got ${typeof value})`);
     }
+    cleanResult[name] = value;
   }
 
-
-  return input;
+  return cleanResult;
 }
 
 /** Backward-compatible alias for validateKeyValues. */

@@ -510,7 +510,14 @@ class MongoSchemaTable<Columns extends Record<string, unknown>> implements Schem
       throw new KvdbConfigError(`Unknown key: ${keyName}`);
     }
 
-    const doc = await this.collection.findOne({ [keyName]: keyValue } as any);
+    // Defend against NoSQL operator injection: wrap in $eq if keyValue is an object with operator keys
+    const isOperator =
+      keyValue !== null &&
+      typeof keyValue === "object" &&
+      Object.keys(keyValue as object).some((k) => k.startsWith("$"));
+    const queryVal = isOperator ? { $eq: keyValue } : keyValue;
+
+    const doc = await this.collection.findOne({ [keyName]: queryVal } as any);
     if (!doc) return undefined;
     const expiresAt = (doc.expiresAt as number | null) ?? undefined;
     if (expiresAt !== undefined && expiresAt <= Date.now()) {

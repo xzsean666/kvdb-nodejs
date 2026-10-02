@@ -224,14 +224,28 @@ export class PostgresDriver implements Driver {
     try {
       await client.query("BEGIN");
       const now = Date.now();
-      for (const entry of sortedEntries) {
-        await client.query(
-          `INSERT INTO "${this.table}" ("key", "value", "expires_at", "created_at", "updated_at")
-           VALUES ($1, $2, $3, $4, $4)
-           ON CONFLICT ("key") DO UPDATE SET
-             "value" = excluded."value", "expires_at" = excluded."expires_at", "updated_at" = excluded."updated_at"`,
-          [entry.key, entry.value, expiresAtFromTtl(entry.ttlMs, now) ?? null, now],
-        );
+      const CHUNK_SIZE = 200;
+      for (let i = 0; i < sortedEntries.length; i += CHUNK_SIZE) {
+        const chunk = sortedEntries.slice(i, i + CHUNK_SIZE);
+        const params: unknown[] = [];
+        const valueTuples: string[] = [];
+
+        for (const entry of chunk) {
+          const kIdx = params.push(entry.key);
+          const vIdx = params.push(entry.value);
+          const expIdx = params.push(expiresAtFromTtl(entry.ttlMs, now) ?? null);
+          const nowIdx = params.push(now);
+          valueTuples.push(`($${kIdx}, $${vIdx}, $${expIdx}, $${nowIdx}, $${nowIdx})`);
+        }
+
+        const sql = `INSERT INTO "${this.table}" ("key", "value", "expires_at", "created_at", "updated_at")
+          VALUES ${valueTuples.join(",\n")}
+          ON CONFLICT ("key") DO UPDATE SET
+            "value" = excluded."value",
+            "expires_at" = excluded."expires_at",
+            "updated_at" = excluded."updated_at"`;
+
+        await client.query(sql, params);
       }
       await client.query("COMMIT");
     } catch (error) {
@@ -846,6 +860,7 @@ function pgDefault(value: unknown): string {
   if (typeof value === "string") return `'${value.replace(/'/g, "''")}'`;
   if (typeof value === "boolean") return value ? "TRUE" : "FALSE";
   if (value === null) return "NULL";
+  if (typeof value === "object") return `'${JSON.stringify(value).replace(/'/g, "''")}'::jsonb`;
   return String(value);
 }
 

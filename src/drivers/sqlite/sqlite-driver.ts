@@ -855,7 +855,13 @@ function schemaTableName(name: string): string {
 }
 function simpleHash(value: string): string { let hash = 0; for (const char of value) hash = (hash * 31 + char.charCodeAt(0)) >>> 0; return hash.toString(36); }
 function sqliteType(type: string): string { return type === "number" ? "REAL" : type === "integer" || type === "boolean" ? "INTEGER" : "TEXT"; }
-function sqlDefault(value: unknown): string { if (typeof value === "string") return `'${value.replace(/'/g, "''")}'`; if (typeof value === "boolean") return value ? "1" : "0"; if (value === null) return "NULL"; return String(value); }
+function sqlDefault(value: unknown): string {
+  if (typeof value === "string") return `'${value.replace(/'/g, "''")}'`;
+  if (typeof value === "boolean") return value ? "1" : "0";
+  if (value === null) return "NULL";
+  if (typeof value === "object") return `'${JSON.stringify(value).replace(/'/g, "''")}'`;
+  return String(value);
+}
 
 /** Escape LIKE wildcards so a user prefix is matched literally (ESCAPE '\'). */
 function escapeLike(prefix: string): string {

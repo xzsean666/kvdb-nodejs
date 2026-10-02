@@ -40,15 +40,17 @@
 | **TASK-027** | Redis 与 MySQL 驱动扩展 | M3 | **TODO** | TASK-007 | `src/drivers/*` |
 | **TASK-028-QUEUE** | 生产级可靠任务队列子系统 (Queue Subsystem) | M3 | **TODO** | TASK-020 | `src/queue/*`, `src/core/kvdb.ts` |
 | **TASK-029-AUTO-BATCH** | 高性能微批处理与写聚合子系统 (Auto Batch & Write Coalescing) | M3 | **DONE** | TASK-020 | `src/core/batcher.ts`, `src/core/table.ts`, `src/core/kvdb.ts`, `src/drivers/*` |
+| **TASK-031-SECURITY-PERF-HARDENING** | 全面安全漏洞修复与架构性能深度优化 | M3 | **DONE** | TASK-029-AUTO-BATCH | `src/*`, `test/unit/*` |
 
 ---
 
 ## 2. 状态流转总览
 
-- **已完成 (DONE)**: TASK-001 ~ TASK-022, TASK-023-AUDIT, TASK-025-DEEP-AUDIT-HARDENING, TASK-029-AUTO-BATCH (25 项，已交付验证；历史任务卡片归档于 `docs/AI/tasks/completed/`)
+- **已完成 (DONE)**: TASK-001 ~ TASK-022, TASK-023-AUDIT, TASK-025-DEEP-AUDIT-HARDENING, TASK-029-AUTO-BATCH, TASK-031-SECURITY-PERF-HARDENING (26 项，已交付验证；历史任务卡片归档于 `docs/AI/tasks/completed/`)
 - **待开发 (TODO)**: TASK-028-QUEUE (生产级可靠任务队列子系统，规格见 `docs/AI/tasks/TASK-028-QUEUE.md`)
 - **后续规划 (TODO)**: TASK-024 (查询缓存), TASK-025-CACHE (前缀清理), TASK-026 (Docker 合规), TASK-027 (Redis/MySQL 驱动扩展)
 - **待审查/验证中 (REVIEW)**: 0 项
+- **进行中 (IN_PROGRESS)**: 0 项
 - **已阻塞 (BLOCKED)**: 0 项
 
 ---
@@ -61,6 +63,7 @@
 - **Milestone 2**: 动态多键与物理索引架构 (100% DONE)
 - **Milestone 3**:
   - [x] TASK-029-AUTO-BATCH: 高性能微批处理与写聚合子系统 (DONE)
+  - [x] TASK-031-SECURITY-PERF-HARDENING: 全面安全漏洞修复与架构性能深度优化 (DONE)
   - [ ] TASK-028-QUEUE: 生产级可靠任务队列子系统 (TODO - 规格已就绪)
   - [ ] TASK-024: 查询结果缓存 (Query Cache + Invalidation)
   - [ ] TASK-025-CACHE: Cache 前缀清理能力 (deleteByPrefix)

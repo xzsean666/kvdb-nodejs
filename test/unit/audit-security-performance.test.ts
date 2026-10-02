@@ -5,6 +5,7 @@ import { AutoIndexManager } from "../../src/core/auto-index.js";
 import { parsePath, parseColumnField, parseWhere, parseFindOptions } from "../../src/query/parser.js";
 import {
   validateTableSchema,
+  validateColumnValues,
   evolveSchemaAddKey,
 } from "../../src/core/table-schema.js";
 import {
@@ -715,5 +716,190 @@ describe("Comprehensive Audit: Security, Performance & Soundness", () => {
       });
     });
   });
+
+  describe("19. Security: validateKeyValues Rejects Prototype Methods as Keys", () => {
+    it("strictly rejects toString, valueOf, hasOwnProperty etc. as unrecognized keys", () => {
+      const schema = {
+        primaryKey: { name: "id", type: "string" as const },
+        keys: {
+          age: { type: "integer" as const },
+        },
+      };
+
+      expect(() => {
+        validateColumnValues(schema, { toString: "malicious" });
+      }).toThrow(KvdbSchemaError);
+
+      expect(() => {
+        validateColumnValues(schema, { valueOf: 123 });
+      }).toThrow(KvdbSchemaError);
+
+      expect(() => {
+        validateColumnValues(schema, { hasOwnProperty: true });
+      }).toThrow(KvdbSchemaError);
+
+      expect(() => {
+        validateColumnValues(schema, { constructor: "attacker" });
+      }).toThrow(KvdbSchemaError);
+    });
+  });
+
+  describe("20. Security: MongoSchemaTable Defends against NoSQL Operator Injection in getRecordByKey", () => {
+    it("wraps key search in explicit $eq operator", async () => {
+      const mockFindOne = vi.fn(async (_filter: any) => ({
+        _id: "user-123",
+        value: JSON.stringify({ name: "Alice" }),
+        email: "alice@example.com",
+        expiresAt: null,
+      }));
+      const mockItemsCollection = {
+        findOne: mockFindOne,
+        deleteOne: vi.fn(),
+        createIndex: vi.fn(async () => "ok"),
+      };
+      const mockRegistryCollection = {
+        findOne: vi.fn(async () => null),
+        updateOne: vi.fn(async () => ({ matchedCount: 1 })),
+        createIndex: vi.fn(async () => "ok"),
+      };
+      const mockDb = {
+        collection: vi.fn((name: string) => {
+          if (name === "kvdb_schema_registry") return mockRegistryCollection;
+          return mockItemsCollection;
+        }),
+      } as unknown as Db;
+      const mockClient = { close: vi.fn() } as unknown as MongoClient;
+
+      const driver = new MongoDriver(mockClient, mockDb, mockItemsCollection as any);
+      const schema = {
+        primaryKey: { name: "id", type: "string" as const },
+        keys: {
+          email: { type: "string" as const },
+        },
+      };
+      const table = await driver.openSchemaTable!("users", schema);
+
+      // Malicious attempt: passing operator object
+      await table!.getRecordByKey!("email", { $ne: null });
+
+      expect(mockFindOne).toHaveBeenCalledTimes(1);
+      // Filter must have { email: { $eq: { $ne: null } } } rather than bare { email: { $ne: null } }
+      expect(mockFindOne).toHaveBeenCalledWith({
+        email: { $eq: { $ne: null } },
+      });
+    });
+  });
+
+  describe("21. Soundness & Security: Schema DDL with JSON Default Values", () => {
+    it("creates table with valid JSON literal default in SQLite without [object Object]", async () => {
+      const db = new KVDB({ driver: "sqlite", url: ":memory:" });
+      const table = db.table("json_default_test", {
+        schema: {
+          primaryKey: { name: "id", type: "string" },
+          keys: {
+            settings: { type: "json", default: { theme: "dark", notifications: true } },
+          },
+        },
+      });
+
+      await table.set("k1", { val: 1 }, { keys: {} });
+      await table.flush();
+
+      const raw = (await db.raw()) as any;
+      const ddl = raw
+        .prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name LIKE '%json_default_test%'")
+        .get();
+
+      expect(ddl.sql).not.toContain("[object Object]");
+      expect(ddl.sql).toContain('DEFAULT \'{"theme":"dark","notifications":true}\'');
+
+      const rec = await table.getRecord("k1");
+      expect(rec?.columns.settings).toEqual({ theme: "dark", notifications: true });
+
+      await db.close();
+    });
+  });
+
+  describe("22. Performance & Consistency: Schema Table Singleton Caching and Cross-Instance RYW", () => {
+    it("returns identical Table singleton for matching schema and enables 100% RYW across calls", async () => {
+      const db = new KVDB({ driver: "sqlite", url: ":memory:" });
+      const schema = {
+        primaryKey: { name: "id", type: "string" as const },
+        keys: {
+          dept: { type: "string" as const },
+        },
+      };
+
+      const table1 = db.table("staff", { schema });
+      const table2 = db.table("staff", { schema });
+
+      expect(table1).toBe(table2);
+
+      // Write via table1 (buffered in memory)
+      const setPromise = table1.set("emp-1", { name: "Bob" }, { keys: { dept: "Engineering" } });
+
+      // Read via table2 before flush: must read un-flushed write from the shared batcher!
+      const unFlushedRead = await table2.get("emp-1");
+      expect(unFlushedRead).toEqual({ name: "Bob" });
+
+      await table1.flush();
+      await setPromise;
+      await db.close();
+    });
+
+    it("throws KvdbConfigError on schema conflict for the same table namespace", async () => {
+      const db = new KVDB({ driver: "sqlite", url: ":memory:" });
+      db.table("items", {
+        schema: {
+          primaryKey: { name: "id", type: "string" },
+          keys: {
+            category: { type: "string" },
+          },
+        },
+      });
+
+      expect(() => {
+        db.table("items", {
+          schema: {
+            primaryKey: { name: "id", type: "integer" }, // conflicting PK type!
+            keys: {
+              category: { type: "string" },
+            },
+          },
+        });
+      }).toThrow();
+
+      await db.close();
+    });
+  });
+
+  describe("23. Performance: PostgresDriver.setMany Multi-Row SQL Aggregation", () => {
+    it("executes multi-row INSERT INTO ... VALUES ($1..), ($5..) ON CONFLICT in single query", async () => {
+      const queries: Array<{ sql: string; params?: unknown[] }> = [];
+      const mockClient = {
+        query: vi.fn(async (sql: string, params?: unknown[]) => {
+          queries.push({ sql: sql.trim(), params });
+          return { rowCount: 1 };
+        }),
+        release: vi.fn(),
+      };
+      const mockPool = {
+        connect: vi.fn(async () => mockClient),
+      } as unknown as Pool;
+
+      const driver = new PostgresDriver(mockPool, "kvdb_kv");
+      await driver.setMany([
+        { key: "k1", value: "v1", ttlMs: 1000 },
+        { key: "k2", value: "v2", ttlMs: 2000 },
+      ]);
+
+      const insertQuery = queries.find((q) => q.sql.includes('INSERT INTO "kvdb_kv"'));
+      expect(insertQuery).toBeDefined();
+      expect(insertQuery?.sql).toContain("VALUES ($1, $2, $3, $4, $4),\n($5, $6, $7, $8, $8)");
+      expect(insertQuery?.sql).toContain("ON CONFLICT");
+      expect(insertQuery?.params).toHaveLength(8);
+    });
+  });
 });
+
 

@@ -27,6 +27,7 @@ import type {
   TableIndexDefinition,
   MultiKeyIndexDefinition,
 } from "./table-schema.js";
+import { schemasEqual } from "./table-schema.js";
 import { resolveAutoBatchOptions } from "./batcher.js";
 import type { AutoBatchOptions } from "./batcher.js";
 
@@ -108,11 +109,17 @@ export class KVDB {
     namespace: string,
     options: TableOptions<Columns> = {},
   ): Table<Value, Columns> {
-    const hasCustomOptions = options.cache || options.schema || options.autoBatch !== undefined;
-    const cacheKey = namespace;
-    if (!hasCustomOptions) {
-      const cached = this.tableCache.get(cacheKey);
-      if (cached) return cached as Table<Value, Columns>;
+    const cached = this.tableCache.get(namespace);
+    if (cached) {
+      if (options.schema) {
+        if (!cached.schema) {
+          throw new KvdbConfigError(`Table "${namespace}" is already opened as a basic KV table without schema.`);
+        }
+        if (!schemasEqual(cached.schema, options.schema)) {
+          throw new KvdbConfigError(`Schema conflict for table "${namespace}".`);
+        }
+      }
+      return cached as Table<Value, Columns>;
     }
 
     const cache = options.cache ? toCache(options.cache) : this.cache;
@@ -127,7 +134,7 @@ export class KVDB {
       schema: options.schema,
       autoBatch,
     });
-    this.tableCache.set(cacheKey, tbl);
+    this.tableCache.set(namespace, tbl);
     return tbl;
   }
 

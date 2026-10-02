@@ -100,6 +100,11 @@ export class Table<Value = JsonValue, Columns extends Record<string, unknown> = 
     return this.writeBatcher?.pendingCount ?? 0;
   }
 
+  /** The physical schema associated with this table, if any. */
+  get schema(): TableSchema | MultiKeySchema | undefined {
+    return this.deps.schema;
+  }
+
   private async flushBatch(payload: BatchFlushPayload<Value>): Promise<BatchFlushResult | void> {
     const schema = await this.schemaDriver();
     const deletedKeys = new Set<string | number>();
@@ -507,14 +512,14 @@ export class Table<Value = JsonValue, Columns extends Record<string, unknown> = 
       if (pending) {
         if (pending.type === "delete") return undefined;
         if (pending.item) {
-          return deserialize<Value>(serialize(pending.item.value as JsonValue));
+          return safeClone(pending.item.value as Value);
         }
       }
       const inFlight = this.writeBatcher.getInFlight(key);
       if (inFlight) {
         if (inFlight.type === "delete") return undefined;
         if (inFlight.item) {
-          return deserialize<Value>(serialize(inFlight.item.value as JsonValue));
+          return safeClone(inFlight.item.value as Value);
         }
       }
     }
@@ -972,4 +977,16 @@ function ttlFromExpiry(expiresAt?: number): number | undefined {
   if (expiresAt === undefined) return undefined;
   const remaining = expiresAt - Date.now();
   return remaining > 0 ? remaining : 1;
+}
+
+function safeClone<T>(val: T): T {
+  if (val === null || typeof val !== "object") return val;
+  if (typeof globalThis.structuredClone === "function") {
+    try {
+      return globalThis.structuredClone(val);
+    } catch {
+      // Fallback for non-cloneable objects
+    }
+  }
+  return deserialize<T>(serialize(val as JsonValue));
 }
