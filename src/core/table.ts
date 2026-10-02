@@ -442,7 +442,12 @@ export class Table<Value = JsonValue, Columns extends Record<string, unknown> = 
           }
           written = applyPatch(deserialize<Value>(current.value), patch);
           writtenTtl = options.ttlMs ?? ttlFromExpiry(current.expiresAt);
-          return { value: serialize(written as JsonValue), ttlMs: writtenTtl };
+          const colsToUpdate = options.keys ?? options.columns;
+          return {
+            value: serialize(written as JsonValue),
+            ttlMs: writtenTtl,
+            columns: colsToUpdate as Record<string, unknown> | undefined,
+          };
         });
       } else {
         const record = await schema.getRecord(key);
@@ -454,7 +459,9 @@ export class Table<Value = JsonValue, Columns extends Record<string, unknown> = 
         }
         written = applyPatch(deserialize<Value>(record.value), patch);
         writtenTtl = options.ttlMs ?? ttlFromExpiry(record.expiresAt);
-        await schema.setRecord(key, serialize(written as JsonValue), record.columns, writtenTtl);
+        const colsToUpdate = (options.keys ?? options.columns) as Record<string, unknown> | undefined;
+        const mergedCols = colsToUpdate ? { ...record.columns, ...colsToUpdate } : record.columns;
+        await schema.setRecord(key, serialize(written as JsonValue), mergedCols, writtenTtl);
       }
 
       if (this.deps.cache) await this.deps.cache.set(cKey, written, writtenTtl);

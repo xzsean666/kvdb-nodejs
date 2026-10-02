@@ -579,7 +579,9 @@ class MongoSchemaTable<Columns extends Record<string, unknown>> implements Schem
       if (pk !== "_id") {
         docToSet[pk] = key;
       }
-      const cols = current ? current.columns : {};
+      const cols = next.columns !== undefined
+        ? { ...(current ? current.columns : {}), ...next.columns }
+        : (current ? current.columns : {});
       for (const [name, def] of Object.entries(this.secondaryKeys)) {
         const val = cols[name];
         if (val === undefined) {

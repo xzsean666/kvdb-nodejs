@@ -81,6 +81,7 @@ export {
   KvdbConfigError,
   KvdbSchemaError,
   KvdbMigrationError,
+  KvdbQueueError,
 } from "./core/errors.js";
 export type { KvdbErrorCode } from "./core/errors.js";
 
@@ -131,5 +132,22 @@ export type {
   BatchFlushResult,
   FlushHandler,
 } from "./core/batcher.js";
+
+// Reliable Queue Subsystem (TASK-028-QUEUE).
+export { Queue, QUEUE_TABLE_SCHEMA } from "./queue/queue.js";
+export type { QueueColumns } from "./queue/queue.js";
+export { Worker } from "./queue/worker.js";
+export type { WorkerEvents } from "./queue/worker.js";
+export type {
+  Job,
+  JobState,
+  JobOptions,
+  JobData,
+  QueueOptions,
+  WorkerOptions,
+  QueueStats,
+  BackoffOptions,
+  JobProcessor,
+} from "./queue/types.js";
 
 

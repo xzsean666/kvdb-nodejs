@@ -69,3 +69,10 @@ export class KvdbMigrationError extends KvdbError {
     this.name = "KvdbMigrationError";
   }
 }
+
+export class KvdbQueueError extends KvdbError {
+  constructor(message: string, options?: { cause?: unknown }) {
+    super("QUERY", message, options);
+    this.name = "KvdbQueueError";
+  }
+}

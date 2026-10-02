@@ -681,7 +681,9 @@ class PostgresSchemaTable<Columns extends Record<string, unknown>> implements Sc
       const names = Object.keys(this.secondaryKeys);
       const fields = [pk, ...names, "value", "expires_at", "created_at", "updated_at"];
       const params: unknown[] = [key];
-      const cols = current ? current.columns : {};
+      const cols = next.columns !== undefined
+        ? { ...(current ? current.columns : {}), ...next.columns }
+        : (current ? current.columns : {});
       for (const name of names) {
         const val = cols[name];
         const def = this.secondaryKeys[name]!;

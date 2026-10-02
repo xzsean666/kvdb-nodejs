@@ -25,5 +25,16 @@
 - 达到最大尝试次数自动进入死信队列（`failed`）。
 
 ## Status
-TODO
+DONE (100% 交付并通过全量验证)
+
+## 4. 交付清单与验证结果
+- **类型系统与错误**: `src/queue/types.ts` 定义了完整的 `Job`, `JobState`, `JobOptions`, `WorkerOptions`, `QueueStats`, `BackoffOptions`, `JobProcessor`；`src/core/errors.ts` 导出 `KvdbQueueError`。
+- **物理队列引擎**: `src/queue/queue.ts` 基于物理 Schema 表 `_kvdb_queue_<name>` 实现了 `push`, `pushMany`, `pop`, `ack`, `nack`, `heartbeat`, `getJob`, `getStats`, `retryFailed`, `clean`。
+- **Worker 运行器**: `src/queue/worker.ts` 实现多并发槽位调度、后台自动心跳续约、指数退避重试、暂停/恢复与优雅停机（`close()` 自动等待活跃槽位清空并注销资源）。
+- **物理 Schema 列级更新强化**: 发现并修复了底层驱动在 `updateRecord` 时丢失更新列的缺陷，使 `table.update(..., { keys: ... })` 在 SQLite、PostgreSQL、MongoDB 全面支持列级原子修改。
+- **门面与导出**: `src/core/kvdb.ts` 挂载 `db.queue()` 与 `db.worker()`，并在 `db.close()` 时自动关闭并注销所有活跃 Worker；`src/index.ts` 导出全部核心类与类型。
+- **单元与集成测试**:
+  - `test/unit/queue.test.ts`: 11 项全功能单测覆盖优先级抢占、租约防重、心跳续约、指数退避重试、死信队列、优雅停机。
+  - `test/integration/queue-sqlite.test.ts`: 2 项磁盘文件真实多连接与故障恢复集成测试。
+- **实战示例**: `examples/23-reliable-task-queue.ts` 演示多 Worker 异步订单处理、网络抖动退避重试与平滑停机。
 

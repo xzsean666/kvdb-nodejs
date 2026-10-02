@@ -678,7 +678,9 @@ class SqliteSchemaTable<Columns extends Record<string, unknown>>
     const run = this.database.transaction((k: string | number) => {
       const current = this.getRecord(k);
       const result = mutate(current);
-      const cols = current ? current.columns : {};
+      const cols = result.columns !== undefined
+        ? { ...(current ? current.columns : {}), ...result.columns }
+        : (current ? current.columns : {});
       this.setRecord(k, result.value, cols, result.ttlMs);
     });
     run.immediate(key);

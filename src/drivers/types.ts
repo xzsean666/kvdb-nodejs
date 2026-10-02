@@ -58,6 +58,8 @@ export interface UpdateResult {
   value: string;
   /** Relative TTL in ms, or undefined for no expiry. */
   ttlMs?: number;
+  /** Optional updated columns for schema tables. */
+  columns?: Record<string, unknown>;
 }
 
 /**

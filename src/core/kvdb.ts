@@ -30,6 +30,9 @@ import type {
 import { schemasEqual } from "./table-schema.js";
 import { resolveAutoBatchOptions } from "./batcher.js";
 import type { AutoBatchOptions } from "./batcher.js";
+import { Queue } from "../queue/queue.js";
+import { Worker } from "../queue/worker.js";
+import type { QueueOptions, WorkerOptions, JobProcessor } from "../queue/types.js";
 
 
 /** Driver names accepted in config (mirrors docs/SPEC.md and the README). */
@@ -90,6 +93,8 @@ export class KVDB {
   private readonly ttlCleanupIntervalMs: number | undefined;
   private readonly autoBatch: boolean | AutoBatchOptions | undefined;
   private readonly tableCache = new Map<string, Table<any, any>>();
+  private readonly queueCache = new Map<string, Queue<any, any>>();
+  private readonly activeWorkers = new Set<Worker<any, any>>();
   private driverPromise: Promise<Driver> | undefined;
   private cleanupTimer: ReturnType<typeof setInterval> | undefined;
 
@@ -149,6 +154,39 @@ export class KVDB {
     }
   }
 
+  /**
+   * Access or create a reliable task queue instance.
+   */
+  queue<Payload = unknown, Result = unknown>(
+    name: string,
+    options?: QueueOptions,
+  ): Queue<Payload, Result> {
+    const existing = this.queueCache.get(name);
+    if (existing) {
+      return existing as Queue<Payload, Result>;
+    }
+    const q = new Queue<Payload, Result>(name, this, options);
+    this.queueCache.set(name, q);
+    return q;
+  }
+
+  /**
+   * Create and register a task Worker for a given queue.
+   */
+  worker<Payload = unknown, Result = unknown>(
+    queue: Queue<Payload, Result> | string,
+    processor: JobProcessor<Payload, Result>,
+    options?: WorkerOptions,
+  ): Worker<Payload, Result> {
+    const q = typeof queue === "string" ? this.queue<Payload, Result>(queue) : queue;
+    const w = new Worker<Payload, Result>(q, processor, options);
+    this.activeWorkers.add(w);
+    w.once("closed", () => {
+      this.activeWorkers.delete(w);
+    });
+    return w;
+  }
+
   /** Delete all currently-expired entries across the backend; returns the count. */
   async purgeExpired(): Promise<number> {
     return (await this.getDriver()).purgeExpired();
@@ -169,6 +207,15 @@ export class KVDB {
       clearInterval(this.cleanupTimer);
       this.cleanupTimer = undefined;
     }
+    // Stop all active queue workers
+    if (this.activeWorkers.size > 0) {
+      await Promise.allSettled(
+        Array.from(this.activeWorkers).map((w) => w.close()),
+      );
+      this.activeWorkers.clear();
+    }
+    this.queueCache.clear();
+
     // Flush all active tables before closing driver
     await Promise.all(
       Array.from(this.tableCache.values()).map((t) => t.flush().catch(() => {})),
