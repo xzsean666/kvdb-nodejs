@@ -14,13 +14,13 @@ description: "面向 Node.js 的高性能、多驱动、可扩展 KV 数据库 S
 - **模块定位**：面向 Node.js (>=22) 的企业级、高性能、多后端、可扩展 KV Database SDK。提供统一的 KV 访问门面、原生物理多键（Multi-Key）二级索引、JSON 语法查询引擎、独立分层缓存（Cache）、原子更新（`update`）、批量写聚合缓冲引擎（`WriteBatcher`）以及基于持久化表的可靠任务队列（`Queue`）。
 - **源码根路径**：`/ssd0/git/kvdb-nodejs`
 - **托管账号**：`xzsean666`
-- **Git 远程地址**：`https://github.com/xzsean666/kvdb-nodejs.git`
-- **当前稳定 Commit Hash**：`89040274713ecc86863e8d47963f8f8d92f5f388`
-- **业务项目依赖声明**：
+- **Git 远程仓库**：`https://github.com/xzsean666/kvdb-nodejs.git`
+- **依赖声明规范 (Git + Commit Hash)**：
+  业务项目接入时按规范使用 Git 配合目标 Commit Hash 锁定依赖。**不固定写死单一旧 Hash**，接入或更新时由 AI / 开发者通过 `git -C /ssd0/git/kvdb-nodejs rev-parse HEAD` 获取当前最新 Commit Hash，或在开发阶段临时使用 `#main` 分支：
   ```json
   {
     "dependencies": {
-      "kvdb-sdk": "git+https://github.com/xzsean666/kvdb-nodejs.git#89040274713ecc86863e8d47963f8f8d92f5f388"
+      "kvdb-sdk": "git+https://github.com/xzsean666/kvdb-nodejs.git#<COMMIT_HASH>"
     }
   }
   ```
@@ -141,6 +141,10 @@ const schema: MultiKeySchema<TokenKeys> = {
   // 可选：指定物理主键（默认 name: "key", type: "string"；支持 integer 自增/主键）
   primaryKey: { name: "address", type: "string" },
 
+  // 可选：是否自动创建并维护 created_at 与 updated_at 物理列（默认 true）
+  // 设为 false 可构建极简表（Lean Schema），并允许在 keys 中自定义专属的 created_at 字段
+  timestamps: true,
+
   // 二级键（物理列）定义：映射到底层真实的物理字段
   keys: {
     symbol: {
@@ -189,9 +193,14 @@ const tokens = db.table<TokenData, TokenKeys>("tokens", { schema });
 | `"boolean"` | `INTEGER(0/1)` / `BOOLEAN` / `Boolean`| 状态开关、标记位 |
 | `"json"` | `TEXT(JSON)` / `JSONB` / `Object` | 结构化子对象物理列 |
 
-- `nullable?: boolean`：是否允许为 `null`（默认 `true`）。
-- `default?: unknown`：默认值。
-- `index?: boolean | { name?: string; unique?: boolean }`：单列原生索引配置。
+- **列属性定义**：
+  - `nullable?: boolean`：是否允许为 `null`（默认 `true`）。
+  - `default?: unknown`：默认值。
+  - `index?: boolean | { name?: string; unique?: boolean }`：单列原生索引配置。
+- **表级配置项**：
+  - `timestamps?: boolean`：是否自动维护 `created_at` 与 `updated_at`。默认为 `true`。若设置为 `false`：
+    - 底层建表时省去系统级时间戳列，提升写入性能与降低存储冗余（极简精简表）。
+    - 解除 `created_at` 和 `updated_at` 的保留字锁定，允许业务在 `keys` 中定义自己的时间戳列（如自定义整型 Unix timestamp）。
 
 ### 3.3 写入与高性能点查对比
 
@@ -457,10 +466,12 @@ const worker = db.worker("order_tasks", async (job) => {
 - **错误姿势**：对已有数据的表执行 `table.addKey("status", { type: "string", nullable: false })`。底层执行 `ALTER TABLE ADD COLUMN NOT NULL` 会因已有行无数据而导致数据库抛出错误。
 - **正确姿势**：增加非空物理列时，**强制显式提供默认值**，如 `table.addKey("status", { type: "string", nullable: false, default: "active", index: true })`。
 
-### 3. 【命名陷阱】严禁使用系统保留字段名
-- **规则**：主键名及二级键名**严禁**使用以下系统保留字段：
-  `value`、`expires_at`、`created_at`、`updated_at`、`_id`、`__proto__`、`constructor`、`prototype`。
-- **说明**：SDK 会主动进行白名单与保留字校验，一旦命中会抛出 `KvdbSchemaError`。
+### 3. 【命名陷阱】系统保留字段与严格 Schema 校验
+- **核心保留字段（任何情况均禁止使用）**：
+  `value`、`expires_at`、`_id`、`__proto__`、`constructor`、`prototype`。
+- **时间戳字段（默认保留）**：
+  在默认 `timestamps: true` 模式下，`created_at` 与 `updated_at` 由 SDK 内部维护，禁止用作自定义二级键名。若业务需要定义专属的 `created_at`/`updated_at`，**必须在 Schema 中显式指定 `timestamps: false`**。
+- **严格校验机制**：SDK 具备严格的 Schema 校验（不会静默吞错），一旦发现非法列名或保留字，会在表初始化或操作时直接抛出 `KvdbSchemaError` 并附带明确修复指引。
 
 ### 4. 【并发陷阱】外部直接读取与微批聚合时钟差
 - **机制**：SDK 默认开启 `autoBatch` 微批处理（默认等待时间 20ms）。在执行 `table.set()` 后，数据会先进入内存聚合队列，待窗口排空或达到 50 条时由参数化 Multi-Row SQL 一并落盘。
