@@ -362,8 +362,11 @@ export class Table<Value = JsonValue, Columns extends Record<string, unknown> = 
         if (this.deps.schema) throw new KvdbError("UNSUPPORTED", "Driver does not support physical schema tables");
         return undefined;
       }
-      try {
+      if (this.deps.schema) {
         return await driver.openSchemaTable(this.deps.schemaName ?? this.namespace, this.deps.schema);
+      }
+      try {
+        return await driver.openSchemaTable(this.deps.schemaName ?? this.namespace, undefined);
       } catch {
         return undefined;
       }

@@ -53,6 +53,8 @@ export interface MultiKeySchema<
   keys: { [Name in keyof Keys]-?: KeyDefinition } & Record<string, KeyDefinition>;
   indexes?: MultiKeyIndexDefinition[];
   version?: number;
+  /** Whether to maintain automatic `created_at` and `updated_at` timestamps. Defaults to `true`. Set `false` for lean key-value schemas. */
+  timestamps?: boolean;
   /** Backward-compatible alias for keys */
   columns?: { [Name in keyof Keys]-?: KeyDefinition } & Record<string, KeyDefinition>;
 }
@@ -64,6 +66,8 @@ export interface TableSchema<Columns extends Record<string, unknown> = Record<st
   keys?: { [Name in keyof Columns]-?: KeyDefinition } & Record<string, KeyDefinition>;
   indexes?: TableIndexDefinition[];
   version?: number;
+  /** Whether to maintain automatic `created_at` and `updated_at` timestamps. Defaults to `true`. Set `false` for lean key-value schemas. */
+  timestamps?: boolean;
 }
 
 export interface PhysicalRecord<
@@ -97,19 +101,25 @@ export type InferKeysRecord<T extends Record<string, KeyDefinition>> = {
 };
 
 const IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/;
-const RESERVED = new Set([
+const CORE_RESERVED = new Set([
   "value",
   "expires_at",
-  "created_at",
-  "updated_at",
   "_id",
   "__proto__",
   "constructor",
   "prototype",
 ]);
 
-function isReserved(name: string): boolean {
-  return RESERVED.has(name.toLowerCase());
+const TIMESTAMP_RESERVED = new Set([
+  "created_at",
+  "updated_at",
+]);
+
+function isReserved(name: string, timestamps = true): boolean {
+  const lower = name.toLowerCase();
+  if (CORE_RESERVED.has(lower)) return true;
+  if (timestamps && TIMESTAMP_RESERVED.has(lower)) return true;
+  return false;
 }
 
 export interface NormalizedSchema {
@@ -118,6 +128,7 @@ export interface NormalizedSchema {
   columns: Record<string, KeyDefinition>;
   indexes: Array<{ name?: string; keys: string[]; columns: string[]; unique?: boolean }>;
   version: number;
+  timestamps: boolean;
 }
 
 /**
@@ -146,17 +157,19 @@ export function normalizeTableSchema(schema: TableSchema | MultiKeySchema): Norm
     columns: clonedKeys,
     indexes,
     version: schema.version ?? 1,
+    timestamps: schema.timestamps !== false,
   };
 }
 
 export function validateMultiKeySchema(schema: TableSchema | MultiKeySchema): void {
   const pkName = schema.primaryKey?.name ?? "key";
   const pkType = schema.primaryKey?.type ?? "string";
+  const timestamps = schema.timestamps !== false;
 
   if (!IDENTIFIER.test(pkName)) {
     throw new KvdbSchemaError(`Invalid primary key name: ${pkName}`);
   }
-  if (isReserved(pkName)) {
+  if (isReserved(pkName, timestamps)) {
     throw new KvdbSchemaError(`Primary key cannot use reserved word: ${pkName}`);
   }
   if (pkType !== "string" && pkType !== "integer") {
@@ -173,7 +186,12 @@ export function validateMultiKeySchema(schema: TableSchema | MultiKeySchema): vo
     if (!IDENTIFIER.test(name)) {
       throw new KvdbSchemaError(`Invalid key name: ${name}`);
     }
-    if (isReserved(name)) {
+    if (isReserved(name, timestamps)) {
+      if (TIMESTAMP_RESERVED.has(name.toLowerCase())) {
+        throw new KvdbSchemaError(
+          `Key name cannot use reserved word: "${name}". Built-in timestamp columns (${name}) are automatically maintained. To define a custom "${name}" column or omit automatic timestamps, set \`timestamps: false\` on the schema.`
+        );
+      }
       throw new KvdbSchemaError(`Key name cannot use reserved word: ${name}`);
     }
     if (!["string", "integer", "number", "boolean", "json"].includes(definition.type)) {
@@ -329,6 +347,7 @@ export function evolveSchemaAddKey(
     columns: updatedKeys,
     indexes: updatedIndexes,
     version: norm.version + 1,
+    timestamps: norm.timestamps,
   };
 }
 
@@ -376,6 +395,7 @@ export function evolveSchemaAddIndex(
     columns: norm.columns,
     indexes: [...norm.indexes, newIndex],
     version: norm.version + 1,
+    timestamps: norm.timestamps,
   };
 }
 

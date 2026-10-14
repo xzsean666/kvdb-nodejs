@@ -57,11 +57,45 @@ describe("MultiKeySchema: Definition & Validation", () => {
     }
   });
 
-  it("rejects reserved words as secondary key name", () => {
+  it("rejects reserved words as secondary key name when timestamps: true (default)", () => {
     const reserved = ["value", "expires_at", "created_at", "updated_at"];
     for (const word of reserved) {
       expect(() =>
         validateMultiKeySchema({
+          keys: {
+            [word]: { type: "string" },
+          },
+        }),
+      ).toThrow(KvdbSchemaError);
+    }
+  });
+
+  it("allows created_at and updated_at as custom keys when timestamps: false", () => {
+    expect(() =>
+      validateMultiKeySchema({
+        timestamps: false,
+        keys: {
+          created_at: { type: "integer" },
+          updated_at: { type: "integer" },
+        },
+      }),
+    ).not.toThrow();
+
+    const normalized = normalizeTableSchema({
+      timestamps: false,
+      keys: {
+        created_at: { type: "integer" },
+      },
+    });
+    expect(normalized.timestamps).toBe(false);
+  });
+
+  it("still rejects core reserved words even when timestamps: false", () => {
+    const coreReserved = ["value", "expires_at", "_id"];
+    for (const word of coreReserved) {
+      expect(() =>
+        validateMultiKeySchema({
+          timestamps: false,
           keys: {
             [word]: { type: "string" },
           },

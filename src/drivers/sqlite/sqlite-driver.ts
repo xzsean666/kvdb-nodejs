@@ -338,10 +338,11 @@ class SqliteDriver implements Driver {
             }${definition.default !== undefined ? ` DEFAULT ${sqlDefault(definition.default)}` : ""}`,
         )
         .join(",\n");
+      const tsDefs = norm.timestamps !== false ? ', "created_at" INTEGER NOT NULL, "updated_at" INTEGER NOT NULL' : '';
       this.database.exec(
         `CREATE TABLE IF NOT EXISTS ${quoteIdent(physical)} (${pkSql}, ${definitions}${
           definitions ? "," : ""
-        } "value" TEXT NOT NULL, "expires_at" INTEGER, "created_at" INTEGER NOT NULL, "updated_at" INTEGER NOT NULL)`,
+        } "value" TEXT NOT NULL, "expires_at" INTEGER${tsDefs})`,
       );
       this.database.exec(
         `CREATE INDEX IF NOT EXISTS ${quoteIdent(`${physical}_expires_at`)} ON ${quoteIdent(
@@ -505,12 +506,19 @@ class SqliteSchemaTable<Columns extends Record<string, unknown>>
     return (this.schema.keys ?? this.schema.columns ?? {}) as Record<string, KeyDefinition>;
   }
 
+  private get hasTimestamps(): boolean {
+    return this.schema.timestamps !== false;
+  }
+
   private buildStatements(): void {
     const pk = this.pkName;
     const names = Object.keys(this.secondaryKeys);
-    const fields = [pk, ...names, "value", "expires_at", "created_at", "updated_at"];
+    const fields = [pk, ...names, "value", "expires_at"];
+    if (this.hasTimestamps) fields.push("created_at", "updated_at");
     const placeholders = fields.map((field) => `@${field}`).join(",");
-    const updateClauses = [...names, "value", "expires_at", "updated_at"]
+    const updateClausesList = [...names, "value", "expires_at"];
+    if (this.hasTimestamps) updateClausesList.push("updated_at");
+    const updateClauses = updateClausesList
       .map((field) => `${quoteIdent(field)}=excluded.${quoteIdent(field)}`)
       .join(",");
 
@@ -545,9 +553,11 @@ class SqliteSchemaTable<Columns extends Record<string, unknown>>
       [pk]: key,
       value,
       expires_at: expiresAtFromTtl(ttlMs, now) ?? null,
-      created_at: now,
-      updated_at: now,
     };
+    if (this.hasTimestamps) {
+      params.created_at = now;
+      params.updated_at = now;
+    }
     for (const name of names) {
       const def = this.secondaryKeys[name]!;
       const val =

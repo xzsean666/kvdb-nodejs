@@ -168,4 +168,54 @@ describe("Table Multi-Key API (TASK-020)", () => {
     expect(deleted).toBe(true);
     expect(await table.get("counter")).toBeUndefined();
   });
+
+  it("supports lean Multi-Key schema without system timestamps (timestamps: false)", async () => {
+    const schema: MultiKeySchema = {
+      primaryKey: { name: "id", type: "string" },
+      timestamps: false,
+      keys: {
+        wallet: { type: "string", index: true },
+        amount: { type: "number" },
+        created_at: { type: "integer" }, // allowed when timestamps: false!
+      },
+    };
+
+    const table = db.table<{ note: string }, { wallet: string; amount: number; created_at: number }>(
+      "lean_ledger",
+      { schema },
+    );
+
+    await table.set("tx-1", { note: "transfer" }, {
+      keys: {
+        wallet: "0x123",
+        amount: 100,
+        created_at: 1728000000,
+      },
+    });
+
+    const rec = await table.getRecord("tx-1");
+    expect(rec).toBeDefined();
+    expect(rec!.key).toBe("tx-1");
+    expect(rec!.columns.wallet).toBe("0x123");
+    expect(rec!.columns.amount).toBe(100);
+    expect(rec!.columns.created_at).toBe(1728000000);
+    expect(rec!.value).toEqual({ note: "transfer" });
+
+    const found = await table.find({ where: { wallet: "0x123" } });
+    expect(found).toHaveLength(1);
+    expect(found[0]?.value).toEqual({ note: "transfer" });
+  });
+
+  it("throws explicitly on invalid schema with reserved word instead of silently swallowing", async () => {
+    const invalidSchema: MultiKeySchema = {
+      primaryKey: { name: "id", type: "string" },
+      keys: {
+        created_at: { type: "integer" }, // conflicts with default timestamps: true
+      },
+    };
+
+    const table = db.table("invalid_table", { schema: invalidSchema });
+
+    await expect(table.get("key1")).rejects.toThrow(/Key name cannot use reserved word: "created_at"/);
+  });
 });

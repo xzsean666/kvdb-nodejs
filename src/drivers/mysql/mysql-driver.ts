@@ -404,14 +404,13 @@ export class MysqlDriver implements Driver {
         .map(([column, def]) => `\`${column}\` ${mysqlType(def.type)}${def.nullable === false ? " NOT NULL" : ""}${def.default !== undefined ? ` DEFAULT ${mysqlDefault(def.default)}` : ""}`)
         .join(",\n");
 
+      const tsDefs = norm.timestamps !== false ? ',\n          `created_at` BIGINT NOT NULL,\n          `updated_at` BIGINT NOT NULL' : '';
       await this.pool.query(`
         CREATE TABLE IF NOT EXISTS \`${physical}\` (
           ${pkSql},
           ${definitions}${definitions ? "," : ""}
           \`value\` LONGTEXT NOT NULL,
-          \`expires_at\` BIGINT NULL,
-          \`created_at\` BIGINT NOT NULL,
-          \`updated_at\` BIGINT NOT NULL,
+          \`expires_at\` BIGINT NULL${tsDefs},
           INDEX \`idx_${physical}_expires\` (\`expires_at\`)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
       `);
@@ -500,6 +499,10 @@ class MysqlSchemaTable<Columns extends Record<string, unknown>>
     return (this.schema.keys ?? this.schema.columns ?? {}) as Record<string, KeyDefinition>;
   }
 
+  private get hasTimestamps(): boolean {
+    return this.schema.timestamps !== false;
+  }
+
   async setRecord(
     key: string | number,
     value: string,
@@ -509,7 +512,8 @@ class MysqlSchemaTable<Columns extends Record<string, unknown>>
     const pk = this.pkName;
     const now = Date.now();
     const cols = Object.keys(this.secondaryKeys);
-    const colNames = [pk, ...cols, "value", "expires_at", "created_at", "updated_at"];
+    const colNames = [pk, ...cols, "value", "expires_at"];
+    if (this.hasTimestamps) colNames.push("created_at", "updated_at");
     const placeholders = colNames.map(() => "?").join(", ");
 
     const values = [
@@ -517,16 +521,18 @@ class MysqlSchemaTable<Columns extends Record<string, unknown>>
       ...cols.map((name) => this.serializeColumnValue(name, columns[name])),
       value,
       expiresAtFromTtl(ttlMs, now) ?? null,
-      now,
-      now,
     ];
+    if (this.hasTimestamps) {
+      values.push(now, now);
+    }
 
-    const updates = [
+    const updatesList = [
       ...cols.map((c) => `\`${c}\` = VALUES(\`${c}\`)`),
       `\`value\` = VALUES(\`value\`)`,
       `\`expires_at\` = VALUES(\`expires_at\`)`,
-      `\`updated_at\` = VALUES(\`updated_at\`)`,
-    ].join(", ");
+    ];
+    if (this.hasTimestamps) updatesList.push(`\`updated_at\` = VALUES(\`updated_at\`)`);
+    const updates = updatesList.join(", ");
 
     await this.pool.query(
       `INSERT INTO \`${this.table}\` (${colNames.map((c) => `\`${c}\``).join(", ")})
@@ -554,14 +560,16 @@ class MysqlSchemaTable<Columns extends Record<string, unknown>>
       const pk = this.pkName;
       const now = Date.now();
       const cols = Object.keys(this.secondaryKeys);
-      const colNames = [pk, ...cols, "value", "expires_at", "created_at", "updated_at"];
+      const colNames = [pk, ...cols, "value", "expires_at"];
+      if (this.hasTimestamps) colNames.push("created_at", "updated_at");
       const tuplePlaceholders = `(${colNames.map(() => "?").join(", ")})`;
-      const updates = [
+      const updatesList = [
         ...cols.map((c) => `\`${c}\` = VALUES(\`${c}\`)`),
         `\`value\` = VALUES(\`value\`)`,
         `\`expires_at\` = VALUES(\`expires_at\`)`,
-        `\`updated_at\` = VALUES(\`updated_at\`)`,
-      ].join(", ");
+      ];
+      if (this.hasTimestamps) updatesList.push(`\`updated_at\` = VALUES(\`updated_at\`)`);
+      const updates = updatesList.join(", ");
 
       const CHUNK_SIZE = 200;
       for (let i = 0; i < sortedItems.length; i += CHUNK_SIZE) {
@@ -576,9 +584,10 @@ class MysqlSchemaTable<Columns extends Record<string, unknown>>
             ...cols.map((name) => this.serializeColumnValue(name, item.columns[name])),
             item.value,
             expiresAtFromTtl(item.ttlMs, now) ?? null,
-            now,
-            now,
           );
+          if (this.hasTimestamps) {
+            allParams.push(now, now);
+          }
         }
 
         const sql = `INSERT INTO \`${this.table}\` (${colNames.map((c) => `\`${c}\``).join(", ")})
@@ -770,7 +779,8 @@ class MysqlSchemaTable<Columns extends Record<string, unknown>>
         : (current ? current.columns : {});
 
       const keyCols = Object.keys(this.secondaryKeys);
-      const colNames = [pk, ...keyCols, "value", "expires_at", "created_at", "updated_at"];
+      const colNames = [pk, ...keyCols, "value", "expires_at"];
+      if (this.hasTimestamps) colNames.push("created_at", "updated_at");
       const placeholders = colNames.map(() => "?").join(", ");
 
       const values = [
@@ -778,16 +788,18 @@ class MysqlSchemaTable<Columns extends Record<string, unknown>>
         ...keyCols.map((name) => this.serializeColumnValue(name, cols[name])),
         next.value,
         nextExpiresAt ?? null,
-        now,
-        now,
       ];
+      if (this.hasTimestamps) {
+        values.push(now, now);
+      }
 
-      const updates = [
+      const updatesList = [
         ...keyCols.map((c) => `\`${c}\` = VALUES(\`${c}\`)`),
         `\`value\` = VALUES(\`value\`)`,
         `\`expires_at\` = VALUES(\`expires_at\`)`,
-        `\`updated_at\` = VALUES(\`updated_at\`)`,
-      ].join(", ");
+      ];
+      if (this.hasTimestamps) updatesList.push(`\`updated_at\` = VALUES(\`updated_at\`)`);
+      const updates = updatesList.join(", ");
 
       await conn.query(
         `INSERT INTO \`${this.table}\` (${colNames.map((c) => `\`${c}\``).join(", ")})

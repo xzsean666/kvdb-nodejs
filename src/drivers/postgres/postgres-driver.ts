@@ -421,14 +421,13 @@ export class PostgresDriver implements Driver {
       const definitions = Object.entries(norm.keys)
         .map(([column, definition]) => `"${column}" ${pgType(definition.type)}${definition.nullable === false ? " NOT NULL" : ""}${definition.default !== undefined ? ` DEFAULT ${pgDefault(definition.default)}` : ""}`)
         .join(",\n");
+      const tsDefs = norm.timestamps !== false ? ',\n          "created_at" BIGINT NOT NULL,\n          "updated_at" BIGINT NOT NULL' : '';
       await this.pool.query(`
         CREATE TABLE IF NOT EXISTS "${physical}" (
           ${pkSql},
           ${definitions}${definitions ? "," : ""}
           "value" TEXT NOT NULL,
-          "expires_at" BIGINT,
-          "created_at" BIGINT NOT NULL,
-          "updated_at" BIGINT NOT NULL
+          "expires_at" BIGINT${tsDefs}
         )
       `);
       await this.pool.query(`CREATE INDEX IF NOT EXISTS "${physical}_expires_at" ON "${physical}" ("expires_at")`);
@@ -493,11 +492,16 @@ class PostgresSchemaTable<Columns extends Record<string, unknown>> implements Sc
     return (this.schema.keys ?? this.schema.columns ?? {}) as Record<string, KeyDefinition>;
   }
 
+  private get hasTimestamps(): boolean {
+    return this.schema.timestamps !== false;
+  }
+
   async setRecord(key: string | number, value: string, columns: Record<string, unknown>, ttlMs?: number): Promise<void> {
     const pk = this.pkName;
     const names = Object.keys(this.secondaryKeys);
     const now = Date.now();
-    const fields = [pk, ...names, "value", "expires_at", "created_at", "updated_at"];
+    const fields = [pk, ...names, "value", "expires_at"];
+    if (this.hasTimestamps) fields.push("created_at", "updated_at");
     const params: unknown[] = [key];
 
     for (const name of names) {
@@ -514,11 +518,15 @@ class PostgresSchemaTable<Columns extends Record<string, unknown>> implements Sc
 
     params.push(value);
     params.push(expiresAtFromTtl(ttlMs, now) ?? null);
-    params.push(now);
-    params.push(now);
+    if (this.hasTimestamps) {
+      params.push(now);
+      params.push(now);
+    }
 
     const placeholders = fields.map((_, i) => `$${i + 1}`).join(", ");
-    const updateClauses = [...names, "value", "expires_at", "updated_at"]
+    const updateClausesList = [...names, "value", "expires_at"];
+    if (this.hasTimestamps) updateClausesList.push("updated_at");
+    const updateClauses = updateClausesList
       .map((field) => `"${field}" = EXCLUDED."${field}"`)
       .join(", ");
 
@@ -546,8 +554,11 @@ class PostgresSchemaTable<Columns extends Record<string, unknown>> implements Sc
       await client.query("BEGIN");
       const pk = this.pkName;
       const names = Object.keys(this.secondaryKeys);
-      const fields = [pk, ...names, "value", "expires_at", "created_at", "updated_at"];
-      const updateClauses = [...names, "value", "expires_at", "updated_at"]
+      const fields = [pk, ...names, "value", "expires_at"];
+      if (this.hasTimestamps) fields.push("created_at", "updated_at");
+      const updateClausesList = [...names, "value", "expires_at"];
+      if (this.hasTimestamps) updateClausesList.push("updated_at");
+      const updateClauses = updateClausesList
         .map((field) => `"${field}" = EXCLUDED."${field}"`)
         .join(", ");
       const now = Date.now();
@@ -580,10 +591,12 @@ class PostgresSchemaTable<Columns extends Record<string, unknown>> implements Sc
           tuplePlaceholders.push(`$${params.length}`);
           params.push(expiresAtFromTtl(item.ttlMs, now) ?? null);
           tuplePlaceholders.push(`$${params.length}`);
-          params.push(now);
-          tuplePlaceholders.push(`$${params.length}`);
-          params.push(now);
-          tuplePlaceholders.push(`$${params.length}`);
+          if (this.hasTimestamps) {
+            params.push(now);
+            tuplePlaceholders.push(`$${params.length}`);
+            params.push(now);
+            tuplePlaceholders.push(`$${params.length}`);
+          }
 
           valueTuples.push(`(${tuplePlaceholders.join(", ")})`);
         }
@@ -691,7 +704,8 @@ class PostgresSchemaTable<Columns extends Record<string, unknown>> implements Sc
       }
       const next = mutate(current);
       const names = Object.keys(this.secondaryKeys);
-      const fields = [pk, ...names, "value", "expires_at", "created_at", "updated_at"];
+      const fields = [pk, ...names, "value", "expires_at"];
+      if (this.hasTimestamps) fields.push("created_at", "updated_at");
       const params: unknown[] = [key];
       const cols = next.columns !== undefined
         ? { ...(current ? current.columns : {}), ...next.columns }
@@ -709,11 +723,15 @@ class PostgresSchemaTable<Columns extends Record<string, unknown>> implements Sc
       }
       params.push(next.value);
       params.push(expiresAtFromTtl(next.ttlMs, now) ?? null);
-      params.push(now);
-      params.push(now);
+      if (this.hasTimestamps) {
+        params.push(now);
+        params.push(now);
+      }
 
       const placeholders = fields.map((_, i) => `$${i + 1}`).join(", ");
-      const updateClauses = [...names, "value", "expires_at", "updated_at"]
+      const updateClausesList = [...names, "value", "expires_at"];
+      if (this.hasTimestamps) updateClausesList.push("updated_at");
+      const updateClauses = updateClausesList
         .map((field) => `"${field}" = EXCLUDED."${field}"`)
         .join(", ");
 
