@@ -73,6 +73,8 @@ async function loadMysql(): Promise<any> {
   return mysqlModule;
 }
 
+const IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
 export class MysqlDriverFactory implements DriverFactory {
   readonly provider: ProviderName = "mysql";
   readonly capabilities: DriverCapabilities = {
@@ -83,7 +85,11 @@ export class MysqlDriverFactory implements DriverFactory {
     supportsPrefixScan: true,
   };
 
-  constructor(private readonly options: MysqlDriverOptions) {}
+  constructor(private readonly options: MysqlDriverOptions) {
+    if (options.table !== undefined && !IDENTIFIER.test(options.table)) {
+      throw new KvdbConfigError(`Invalid table name: ${JSON.stringify(options.table)}`);
+    }
+  }
 
   async connect(): Promise<Driver> {
     const table = this.options.table ?? "kvdb_kv";
@@ -107,19 +113,26 @@ export class MysqlDriverFactory implements DriverFactory {
       ownsPool = true;
     }
 
-    const activePool: Pool = pool;
-    await activePool.query(`
-      CREATE TABLE IF NOT EXISTS \`${table}\` (
-        \`key\` VARCHAR(512) PRIMARY KEY,
-        \`value\` LONGTEXT NOT NULL,
-        \`expires_at\` BIGINT NULL,
-        \`created_at\` BIGINT NOT NULL,
-        \`updated_at\` BIGINT NOT NULL,
-        INDEX \`idx_${table}_expires\` (\`expires_at\`)
-      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-    `);
+    try {
+      const activePool: Pool = pool;
+      await activePool.query(`
+        CREATE TABLE IF NOT EXISTS \`${table}\` (
+          \`key\` VARCHAR(512) PRIMARY KEY,
+          \`value\` LONGTEXT NOT NULL,
+          \`expires_at\` BIGINT NULL,
+          \`created_at\` BIGINT NOT NULL,
+          \`updated_at\` BIGINT NOT NULL,
+          INDEX \`idx_${table}_expires\` (\`expires_at\`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+      `);
 
-    return new MysqlDriver(activePool, table, ownsPool);
+      return new MysqlDriver(activePool, table, ownsPool);
+    } catch (err) {
+      if (ownsPool && pool) {
+        await pool.end().catch(() => {});
+      }
+      throw err;
+    }
   }
 }
 
@@ -232,7 +245,7 @@ export class MysqlDriver implements Driver {
       }
       await conn.commit();
     } catch (err) {
-      await conn.rollback();
+      await conn.rollback().catch(() => {});
       throw err;
     } finally {
       conn.release();
@@ -351,7 +364,7 @@ export class MysqlDriver implements Driver {
 
       await conn.commit();
     } catch (err) {
-      await conn.rollback();
+      await conn.rollback().catch(() => {});
       throw err;
     } finally {
       conn.release();
@@ -405,13 +418,14 @@ export class MysqlDriver implements Driver {
         .join(",\n");
 
       const tsDefs = norm.timestamps !== false ? ',\n          `created_at` BIGINT NOT NULL,\n          `updated_at` BIGINT NOT NULL' : '';
+      const expIdx = safeIndexName(`idx_${physical}_expires`);
       await this.pool.query(`
         CREATE TABLE IF NOT EXISTS \`${physical}\` (
           ${pkSql},
           ${definitions}${definitions ? "," : ""}
           \`value\` LONGTEXT NOT NULL,
           \`expires_at\` BIGINT NULL${tsDefs},
-          INDEX \`idx_${physical}_expires\` (\`expires_at\`)
+          INDEX \`${expIdx}\` (\`expires_at\`)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
       `);
 
@@ -423,13 +437,15 @@ export class MysqlDriver implements Driver {
       for (const [column, def] of Object.entries(norm.keys)) {
         if (def.index) {
           const idxOpts = typeof def.index === "object" ? def.index : {};
-          const idxName = idxOpts.name ?? `${physical}_${column}_idx`;
+          const rawIdxName = idxOpts.name ?? `${physical}_${column}_idx`;
+          const idxName = safeIndexName(rawIdxName);
           await this.createIndexIfNotExists(physical, idxName, [column], Boolean(idxOpts.unique));
         }
       }
 
       for (const index of norm.indexes) {
-        const idxName = index.name ?? `${physical}_${index.keys.join("_")}_idx`;
+        const rawIdxName = index.name ?? `${physical}_${index.keys.join("_")}_idx`;
+        const idxName = safeIndexName(rawIdxName);
         await this.createIndexIfNotExists(physical, idxName, index.keys, Boolean(index.unique));
       }
     }
@@ -598,7 +614,7 @@ class MysqlSchemaTable<Columns extends Record<string, unknown>>
       }
       await conn.commit();
     } catch (err) {
-      await conn.rollback();
+      await conn.rollback().catch(() => {});
       throw err;
     } finally {
       conn.release();
@@ -810,7 +826,7 @@ class MysqlSchemaTable<Columns extends Record<string, unknown>>
 
       await conn.commit();
     } catch (err) {
-      await conn.rollback();
+      await conn.rollback().catch(() => {});
       throw err;
     } finally {
       conn.release();
@@ -904,8 +920,15 @@ class MysqlSchemaTable<Columns extends Record<string, unknown>>
 }
 
 function schemaTableName(name: string): string {
-  const safe = name.replace(/[^A-Za-z0-9_]/g, "_");
-  return `kvdb_schema_${safe}_${simpleHash(name)}`;
+  const hash = simpleHash(name);
+  const safe = name.replace(/[^A-Za-z0-9_]/g, "_").slice(0, 36);
+  return `kvdb_schema_${safe}_${hash}`;
+}
+
+function safeIndexName(raw: string): string {
+  if (raw.length <= 64) return raw;
+  const hash = simpleHash(raw);
+  return `idx_${hash}_${raw.slice(0, 48)}`;
 }
 
 function simpleHash(value: string): string {

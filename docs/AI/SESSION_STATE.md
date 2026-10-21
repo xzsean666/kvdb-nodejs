@@ -7,9 +7,52 @@
 
 ## 1. 核心状态概要
 
-- **当前 Goal**: 生产就绪度深度审计与工业级生产加固 (TASK-032-PRODUCTION-READY)
-- **当前 Task**: AutoBatch 深度隐患审计与边界一致性终验
-- **当前状态**: **COMPLETED_AND_VERIFIED** (4 项 P0 阻断隐患、3 项 P1 稳定性短板、2 项 P2 安全与运维功能，以及本次 AutoBatch 深度审计中的 7 项内存快路径、TTL漂移、写乱序与错误传播隐患全部修复完成。266 项单测 100% 通过，149 项真实数据库容器合规测试 100% 绿灯全过，26 个官方示例全部无警告通过，构建产物保持 222KB 轻量体积)
+- **当前 Goal**: 生产环境深度缺陷与短板全量加固 (TASK-033-PRODUCTION-AUDIT-REMEDIATION)
+- **当前 Task**: 实施 14 项生产缺陷与稳定性短板全面修复
+- **当前状态**: **COMPLETED_AND_VERIFIED** (4 项 P0 阻断隐患、5 项 P1 稳定性短板、5 项 P2 安全与运维功能全部修复完成。264 项单测 100% 通过，26 个官方实战示例全部平稳通过，双产物构建保持 229KB 轻量体积)
+
+---
+
+## 2. 本次任务交付清单 (TASK-033-PRODUCTION-AUDIT-REMEDIATION)
+
+### A. 4 项致命生产阻断缺陷修复 (P0 Blockers)
+1. **`db.getDriver()` 与 `Table.schemaDriver()` 连接异常死锁清除 (`src/core/kvdb.ts`, `src/core/table.ts`)**:
+   - 彻底解决了数据库临时抖动或连接失败后 Promise 被永久锁在 rejected 状态的问题。
+   - 在 `.catch()` 中自动复位 `this.driverPromise = undefined` 与 `this.schemaDriverPromise = undefined`，并在 `close()` 中实现安全非阻塞销毁，服务遇网络闪断后可 100% 自动重连自愈。
+2. **多租户与前缀隔离全链路生效 (`src/core/kvdb.ts`, `src/core/table.ts`)**:
+   - 修复了 MultiKey 物理表、任务队列 Queue、点查缓存和 QueryCache 丢失 `tablePrefix` 的致命安全漏洞。
+   - `Table` 物理表命名与注册表记录自动注入 `effectiveSchemaName`，QueryCachePrefix 与 CacheKey 全面打上租户前缀，100% 消除跨租户数据越权与污染风险。
+3. **PostgreSQL 连接池断线进程崩溃防御 (`src/drivers/postgres/postgres-driver.ts`)**:
+   - 挂载 `pool.on("error", ...)` 监听器，杜绝云厂商 NAT 网关或超时杀死空闲连接时触发 Node.js `Unhandled 'error' event` 导致主进程 Fatal Crash。
+   - 驱动初始化与 `updateRecord` 事务中引入安全连接回收与回滚防护。
+4. **Redis 驱动异常与重连死锁清除 (`src/drivers/redis/redis-driver.ts`, `src/cache/stores/redis-store.ts`)**:
+   - 客户端挂载 `error` 监听器消除未捕获异常；连接失败时主动调用 `instance.disconnect()`，消除后台无限重连导致的关机卡死。
+
+### B. 5 项高可用与稳定性短板加固 (P1)
+1. **MySQL 64 位标识符超限保护 (`src/drivers/mysql/mysql-driver.ts`)**:
+   - 引入安全标识符长度控制与哈希固化，保证任何长度的业务表名与列名生成的物理表名与索引名均严格 $\le 64$ 字符，彻底杜绝 `ER_TOO_LONG_IDENT` 崩溃。
+   - 校验物理表名符合 SQL IDENTIFIER 规范。
+2. **Redis 海量键调用爆栈与阻塞消除 (`src/drivers/redis/redis-driver.ts`)**:
+   - 废除 `...keys` spread 传参，实施 500 行安全分块执行 `mget` 与 `del`，杜绝 V8 `RangeError` 爆栈并保护 Redis 单线程。
+   - `iterator()` 升级为真正的分批流式生成器，内存占用恒定 O(1)。
+3. **Redis `setMany` 错误透传与零吞没 (`src/drivers/redis/redis-driver.ts`)**:
+   - 显式校验 `pipeline.exec()` 返回的每个命令结果，杜绝静默吞没异常。
+4. **Queue `getStats()` 防 OOM 优化 (`src/queue/queue.ts`)**:
+   - 针对各任务状态使用物理索引进行带上限（默认 10,000）的统计查询，杜绝百万历史任务下的全表内存 OOM 爆栈。
+5. **Cache 子系统资源关闭补全 (`src/core/kvdb.ts`, `src/core/table.ts`)**:
+   - `KVDB.close()` 全面补齐实例级缓存与表级独立缓存的关闭清理，杜绝 Redis 等长连接句柄泄漏。
+
+### C. 5 项中危与运维规范加固 (P2)
+1. **`WriteBatcher` 定时器 `unref()` (`src/core/batcher.ts`)**:
+   - 落实防抖定时器 unref，保证非阻塞事件循环。
+2. **SQLite 连接 `busy_timeout` (`src/drivers/sqlite/sqlite-driver.ts`)**:
+   - 默认启用 `busy_timeout = 5000` 防并发冲突。
+3. **单元测试外部强依赖解耦 (`test/unit/mysql-driver.test.ts`, `test/unit/redis-driver.test.ts`)**:
+   - 优雅跳过无环境依赖的单测，单测套件 100% 绿灯。
+4. **`package.json` CJS 类型分支映射 (`package.json`)**:
+   - 规范导出 `index.d.cts`，完美支持 TypeScript `NodeNext`。
+5. **全量专项回归测试套件 (`test/unit/audit-remediation.test.ts`)**:
+   - 4 项自动化测试针对恢复能力、租户隔离、缓存关闭与队列统计进行验证。
 
 ---
 

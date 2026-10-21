@@ -118,6 +118,7 @@ class SqliteDriver implements Driver {
     this.dialect = new SqliteDialect("value");
 
     this.database.pragma("case_sensitive_like = ON");
+    this.database.pragma("busy_timeout = 5000");
     if (file !== ":memory:") this.database.pragma("journal_mode = WAL");
 
     this.database.exec(`

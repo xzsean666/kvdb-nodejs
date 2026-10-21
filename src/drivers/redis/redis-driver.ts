@@ -93,9 +93,18 @@ export class RedisDriverFactory implements DriverFactory {
       const instance = new RedisClass(this.options.url ?? "redis://127.0.0.1:6379", {
         lazyConnect: true,
         maxRetriesPerRequest: 3,
+        enableOfflineQueue: false,
         ...this.options.redisOptions,
       }) as Redis;
-      await instance.connect();
+      instance.on("error", () => {
+        // Suppress unhandled error event on Redis client
+      });
+      try {
+        await instance.connect();
+      } catch (err) {
+        instance.disconnect();
+        throw err;
+      }
       client = instance;
       ownsClient = true;
     }
@@ -182,7 +191,13 @@ export class RedisDriver implements Driver {
   async getMany(keys: string[]): Promise<(RawEntry | undefined)[]> {
     if (keys.length === 0) return [];
     const fullKeys = keys.map((k) => this.fullKey(k));
-    const values = await this.client.mget(...fullKeys);
+    const CHUNK_SIZE = 500;
+    const values: (string | null)[] = [];
+    for (let i = 0; i < fullKeys.length; i += CHUNK_SIZE) {
+      const chunk = fullKeys.slice(i, i + CHUNK_SIZE);
+      const batchValues = await this.client.mget(chunk);
+      values.push(...batchValues);
+    }
     return values.map((val: string | null) => (val !== null ? { value: val } : undefined));
   }
 
@@ -201,43 +216,63 @@ export class RedisDriver implements Driver {
         pipeline.set(p, entry.value);
       }
     }
-    await pipeline.exec();
+    const results = await pipeline.exec();
+    if (results) {
+      for (const [err] of results) {
+        if (err) throw err;
+      }
+    }
   }
 
   async deleteMany(keys: string[]): Promise<number> {
     if (keys.length === 0) return 0;
     const fullKeys = keys.map((k) => this.fullKey(k));
-    return await this.client.del(...fullKeys);
+    const CHUNK_SIZE = 500;
+    let deleted = 0;
+    for (let i = 0; i < fullKeys.length; i += CHUNK_SIZE) {
+      const chunk = fullKeys.slice(i, i + CHUNK_SIZE);
+      deleted += await this.client.del(chunk);
+    }
+    return deleted;
   }
 
   async *iterator(prefix?: string): AsyncGenerator<[string, RawEntry]> {
     const pattern = prefix !== undefined ? `${this.fullKey(prefix)}*` : `${this.prefix}*`;
-    const keys = await this.scanKeys(pattern);
-    if (keys.length === 0) return;
-    const values = await this.client.mget(...keys);
-    for (let i = 0; i < keys.length; i++) {
-      const k = keys[i];
-      const v = values[i];
-      if (k !== undefined && v !== null && v !== undefined) {
-        yield [this.stripKey(k), { value: v }];
+    let cursor = "0";
+    do {
+      const [nextCursor, batch] = await this.client.scan(cursor, "MATCH", pattern, "COUNT", 250);
+      cursor = nextCursor;
+      if (batch.length > 0) {
+        const values = await this.client.mget(batch);
+        for (let i = 0; i < batch.length; i++) {
+          const k = batch[i];
+          const v = values[i];
+          if (k !== undefined && v !== null && v !== undefined) {
+            yield [this.stripKey(k), { value: v }];
+          }
+        }
       }
-    }
+    } while (cursor !== "0");
   }
 
   async getByPrefix(prefix: string): Promise<KVEntry[]> {
     const pattern = `${this.fullKey(prefix)}*`;
     const keys = await this.scanKeys(pattern);
     if (keys.length === 0) return [];
-    const values = await this.client.mget(...keys);
+    const CHUNK_SIZE = 500;
     const result: KVEntry[] = [];
-    for (let i = 0; i < keys.length; i++) {
-      const k = keys[i];
-      const v = values[i];
-      if (k !== undefined && v !== null && v !== undefined) {
-        result.push({
-          key: this.stripKey(k),
-          value: v,
-        });
+    for (let i = 0; i < keys.length; i += CHUNK_SIZE) {
+      const chunk = keys.slice(i, i + CHUNK_SIZE);
+      const values = await this.client.mget(chunk);
+      for (let j = 0; j < chunk.length; j++) {
+        const k = chunk[j];
+        const v = values[j];
+        if (k !== undefined && v !== null && v !== undefined) {
+          result.push({
+            key: this.stripKey(k),
+            value: v,
+          });
+        }
       }
     }
     return result;
@@ -264,22 +299,25 @@ export class RedisDriver implements Driver {
     const pattern = keyPrefix ? `${this.fullKey(keyPrefix)}*` : `${this.prefix}*`;
     const keys = await this.scanKeys(pattern);
     if (keys.length === 0) return [];
-    const values = await this.client.mget(...keys);
-
+    const CHUNK_SIZE = 500;
     const candidates: Array<{ key: string; value: string; doc: unknown }> = [];
-    for (let i = 0; i < keys.length; i++) {
-      const k = keys[i];
-      const v = values[i];
-      if (k !== undefined && v !== null && v !== undefined) {
-        try {
-          const doc = deserialize(v);
-          candidates.push({
-            key: this.stripKey(k),
-            value: v,
-            doc,
-          });
-        } catch {
-          // If non-JSON value, skip
+    for (let i = 0; i < keys.length; i += CHUNK_SIZE) {
+      const chunk = keys.slice(i, i + CHUNK_SIZE);
+      const values = await this.client.mget(chunk);
+      for (let j = 0; j < chunk.length; j++) {
+        const k = chunk[j];
+        const v = values[j];
+        if (k !== undefined && v !== null && v !== undefined) {
+          try {
+            const doc = deserialize(v);
+            candidates.push({
+              key: this.stripKey(k),
+              value: v,
+              doc,
+            });
+          } catch {
+            // If non-JSON value, skip
+          }
         }
       }
     }

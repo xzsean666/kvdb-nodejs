@@ -92,24 +92,33 @@ export class PostgresDriverFactory implements DriverFactory {
       );
     }
     const pool = new PoolCtor({ connectionString: this.options.url, ...this.options.poolOptions });
-    const table = this.options.table ?? "kvdb_kv";
-    await pool.query(`
-      CREATE TABLE IF NOT EXISTS "${table}" (
-        "key"        text PRIMARY KEY,
-        "value"      text NOT NULL,
-        "expires_at" bigint,
-        "created_at" bigint NOT NULL,
-        "updated_at" bigint NOT NULL
-      );
-      CREATE INDEX IF NOT EXISTS "${table}_expires_at" ON "${table}" ("expires_at");
-      -- text_pattern_ops so prefix/namespace scans (key LIKE 'ns:%') use an
-      -- index: the default PK btree is unusable for LIKE under non-C collations
-      -- (e.g. en_US.UTF-8). See docs — verified via EXPLAIN against real PG.
-      CREATE INDEX IF NOT EXISTS "${table}_key_prefix" ON "${table}" ("key" text_pattern_ops);
-    `);
-    const driver = new PostgresDriver(pool, table);
-    for (const path of this.options.indexes ?? []) await driver.ensureIndex(path);
-    return driver;
+    pool.on("error", () => {
+      // Suppress unhandled error event on idle client to prevent Node.js process exit.
+      // node-postgres will automatically discard the faulted client and reconnect as needed.
+    });
+    try {
+      const table = this.options.table ?? "kvdb_kv";
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS "${table}" (
+          "key"        text PRIMARY KEY,
+          "value"      text NOT NULL,
+          "expires_at" bigint,
+          "created_at" bigint NOT NULL,
+          "updated_at" bigint NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS "${table}_expires_at" ON "${table}" ("expires_at");
+        -- text_pattern_ops so prefix/namespace scans (key LIKE 'ns:%') use an
+        -- index: the default PK btree is unusable for LIKE under non-C collations
+        -- (e.g. en_US.UTF-8). See docs — verified via EXPLAIN against real PG.
+        CREATE INDEX IF NOT EXISTS "${table}_key_prefix" ON "${table}" ("key" text_pattern_ops);
+      `);
+      const driver = new PostgresDriver(pool, table);
+      for (const path of this.options.indexes ?? []) await driver.ensureIndex(path);
+      return driver;
+    } catch (err) {
+      await pool.end().catch(() => {});
+      throw err;
+    }
   }
 }
 
@@ -186,7 +195,7 @@ export class PostgresDriver implements Driver {
       );
       await client.query("COMMIT");
     } catch (error) {
-      await client.query("ROLLBACK");
+      await client.query("ROLLBACK").catch(() => {});
       throw error;
     } finally {
       client.release();
@@ -251,7 +260,7 @@ export class PostgresDriver implements Driver {
       }
       await client.query("COMMIT");
     } catch (error) {
-      await client.query("ROLLBACK");
+      await client.query("ROLLBACK").catch(() => {});
       throw error;
     } finally {
       client.release();
@@ -430,7 +439,8 @@ export class PostgresDriver implements Driver {
           "expires_at" BIGINT${tsDefs}
         )
       `);
-      await this.pool.query(`CREATE INDEX IF NOT EXISTS "${physical}_expires_at" ON "${physical}" ("expires_at")`);
+      const expiresIdx = safeIndexName(`${physical}_expires_at`);
+      await this.pool.query(`CREATE INDEX IF NOT EXISTS "${expiresIdx}" ON "${physical}" ("expires_at")`);
       await this.pool.query(
         "INSERT INTO kvdb_schema_registry (logical_name, schema_json) VALUES ($1, $2) ON CONFLICT (logical_name) DO NOTHING",
         [name, JSON.stringify(resolved)],
@@ -438,12 +448,14 @@ export class PostgresDriver implements Driver {
       for (const [column, definition] of Object.entries(norm.keys)) {
         if (definition.index) {
           const idxOpts = typeof definition.index === "object" ? definition.index : {};
-          const idxName = idxOpts.name ?? `${physical}_${column}_idx`;
+          const rawIdxName = idxOpts.name ?? `${physical}_${column}_idx`;
+          const idxName = safeIndexName(rawIdxName);
           await this.pool.query(`CREATE ${idxOpts.unique ? "UNIQUE " : ""}INDEX IF NOT EXISTS "${idxName}" ON "${physical}" ("${column}")`);
         }
       }
       for (const index of norm.indexes) {
-        const idxName = index.name ?? `${physical}_${index.keys.join("_")}_idx`;
+        const rawIdxName = index.name ?? `${physical}_${index.keys.join("_")}_idx`;
+        const idxName = safeIndexName(rawIdxName);
         await this.pool.query(
           `CREATE ${index.unique ? "UNIQUE " : ""}INDEX IF NOT EXISTS "${idxName}" ON "${physical}" (${index.keys.map((c) => `"${c}"`).join(", ")})`,
         );
@@ -609,7 +621,7 @@ class PostgresSchemaTable<Columns extends Record<string, unknown>> implements Sc
       }
       await client.query("COMMIT");
     } catch (error) {
-      await client.query("ROLLBACK");
+      await client.query("ROLLBACK").catch(() => {});
       throw error;
     } finally {
       client.release();
@@ -743,7 +755,7 @@ class PostgresSchemaTable<Columns extends Record<string, unknown>> implements Sc
       );
       await client.query("COMMIT");
     } catch (error) {
-      await client.query("ROLLBACK");
+      await client.query("ROLLBACK").catch(() => {});
       throw error;
     } finally {
       client.release();
@@ -866,8 +878,15 @@ class PostgresSchemaTable<Columns extends Record<string, unknown>> implements Sc
 }
 
 function schemaTableName(name: string): string {
-  const safe = name.replace(/[^A-Za-z0-9_]/g, "_");
-  return `kvdb_schema_${safe}_${simpleHash(name)}`;
+  const hash = simpleHash(name);
+  const safe = name.replace(/[^A-Za-z0-9_]/g, "_").slice(0, 40);
+  return `kvdb_schema_${safe}_${hash}`;
+}
+
+function safeIndexName(raw: string): string {
+  if (raw.length <= 63) return raw;
+  const hash = simpleHash(raw);
+  return `idx_${hash}_${raw.slice(0, 48)}`;
 }
 
 function simpleHash(value: string): string {

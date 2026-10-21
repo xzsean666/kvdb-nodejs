@@ -96,7 +96,7 @@ export class Table<Value = JsonValue, Columns extends Record<string, unknown> = 
         opts,
       );
     }
-    this.queryCachePrefix = `_qc:${this.namespace}:`;
+    this.queryCachePrefix = `_qc:${deps.scope.tablePrefix}${this.namespace}:`;
     if (typeof deps.queryCache === "boolean") {
       this.queryCacheEnabled = deps.queryCache;
     } else if (deps.queryCache && typeof deps.queryCache === "object") {
@@ -341,13 +341,18 @@ export class Table<Value = JsonValue, Columns extends Record<string, unknown> = 
     return { deletedKeys };
   }
 
+  /** Optional point-read cache instance associated with this table. */
+  get cache(): Cache | undefined {
+    return this.deps.cache;
+  }
+
   private get namespace(): string {
     return this.deps.scope.namespace;
   }
 
   private cacheKey(key: string, isSchema: boolean): string {
     return isSchema
-      ? `schema:${this.deps.schemaName ?? this.namespace}:${key}`
+      ? `schema:${this.deps.scope.tablePrefix}${this.deps.schemaName ?? this.namespace}:${key}`
       : toPhysicalKey(this.deps.scope, key);
   }
 
@@ -370,7 +375,10 @@ export class Table<Value = JsonValue, Columns extends Record<string, unknown> = 
       } catch {
         return undefined;
       }
-    })();
+    })().catch((err) => {
+      this.schemaDriverPromise = undefined;
+      throw err;
+    });
     return this.schemaDriverPromise;
   }
 

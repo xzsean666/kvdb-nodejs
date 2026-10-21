@@ -379,24 +379,24 @@ export class Queue<Payload = unknown, Result = unknown> {
   }
 
   /**
-   * Get queue statistics by state.
+   * Get queue statistics by state with bounded query protection to prevent memory OOM.
    */
-  async getStats(): Promise<QueueStats> {
-    const records = await this.table.findRecords({});
+  async getStats(options: { limit?: number } = {}): Promise<QueueStats> {
+    const limit = options.limit ?? 10_000;
+    const states: JobState[] = ["waiting", "active", "delayed", "completed", "failed"];
     const stats: QueueStats = {
       waiting: 0,
       active: 0,
       delayed: 0,
       completed: 0,
       failed: 0,
-      total: records.length,
+      total: 0,
     };
 
-    for (const r of records) {
-      const state = r.columns.state;
-      if (state && state in stats) {
-        stats[state as keyof Omit<QueueStats, "total">]++;
-      }
+    for (const s of states) {
+      const items = await this.table.findRecords({ where: { state: s }, limit });
+      stats[s] = items.length;
+      stats.total += items.length;
     }
 
     return stats;

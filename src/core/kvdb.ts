@@ -169,13 +169,14 @@ export class KVDB {
 
     const cache = options.cache ? toCache(options.cache) : this.cache;
     const autoBatch = resolveAutoBatchOptions(options.autoBatch, this.autoBatch);
+    const effectiveSchemaName = this.tablePrefix ? `${this.tablePrefix}${namespace}` : namespace;
     const tbl = new Table<Value, Columns>({
       getDriver: () => this.getDriver(),
       scope: { tablePrefix: this.tablePrefix, namespace },
       cache,
       hooks: this.hooks,
       autoIndex: this.autoIndex,
-      schemaName: namespace,
+      schemaName: effectiveSchemaName,
       schema: options.schema,
       autoBatch,
       queryCache: options.queryCache,
@@ -237,7 +238,8 @@ export class KVDB {
     }
     const driver = await this.getDriver();
     if (driver.dropSchemaTable) {
-      await driver.dropSchemaTable(name);
+      const effectiveName = this.tablePrefix ? `${this.tablePrefix}${name}` : name;
+      await driver.dropSchemaTable(effectiveName);
       return true;
     }
     return false;
@@ -286,12 +288,30 @@ export class KVDB {
     await Promise.all(
       Array.from(this.tableCache.values()).map((t) => t.flush().catch(() => {})),
     );
+
+    // Close any table-level caches
+    for (const table of this.tableCache.values()) {
+      if (table.cache && table.cache !== this.cache) {
+        await table.cache.close().catch(() => {});
+      }
+    }
     this.tableCache.clear();
 
-    if (this.driverPromise === undefined) return;
-    const driver = await this.driverPromise;
-    this.driverPromise = undefined;
-    await driver.close();
+    // Close instance-level shared cache
+    if (this.cache) {
+      await this.cache.close().catch(() => {});
+    }
+
+    if (this.driverPromise !== undefined) {
+      const p = this.driverPromise;
+      this.driverPromise = undefined;
+      try {
+        const driver = await p;
+        await driver.close();
+      } catch {
+        // Driver connection may have rejected; ignore close on unestablished driver
+      }
+    }
   }
 
   /**
@@ -321,7 +341,14 @@ export class KVDB {
   /** Lazily connect once; subsequent callers await the same connection. */
   private getDriver(): Promise<Driver> {
     if (this.driverPromise === undefined) {
-      this.driverPromise = this.factory.connect();
+      this.driverPromise = this.factory.connect().catch((err) => {
+        this.driverPromise = undefined;
+        if (this.cleanupTimer !== undefined) {
+          clearInterval(this.cleanupTimer);
+          this.cleanupTimer = undefined;
+        }
+        throw err;
+      });
       if (this.ttlCleanupIntervalMs !== undefined) this.startCleanupTimer();
     }
     return this.driverPromise;

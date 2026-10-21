@@ -4,15 +4,17 @@ import { Cache } from "../../src/cache/cache.js";
 import { RedisStore } from "../../src/cache/stores/redis-store.js";
 import { RedisDriverFactory } from "../../src/drivers/redis/redis-driver.js";
 
-const REDIS_URL = process.env.KVDB_TEST_REDIS_URL ?? "redis://127.0.0.1:6380";
+const REDIS_URL = process.env.KVDB_TEST_REDIS_URL;
 
-describe("Redis Driver and KVDB Integration", () => {
+const runIntegration = REDIS_URL ? describe : describe.skip;
+
+runIntegration("Redis Driver and KVDB Integration (set KVDB_TEST_REDIS_URL to run)", () => {
   let db: KVDB;
 
   beforeEach(async () => {
     db = new KVDB({
       driver: "redis",
-      url: REDIS_URL,
+      url: REDIS_URL!,
       tablePrefix: "test_kvdb",
     });
     const table = db.table("users");
@@ -54,26 +56,31 @@ describe("Redis Driver and KVDB Integration", () => {
       { score: 30 },
     ]);
 
+    await new Promise((r) => setTimeout(r, 120));
+    expect(await scores.get("u2")).toBeUndefined();
+    expect(await scores.get("u1")).toEqual({ score: 10 });
+
     const deleted = await scores.deleteMany(["u1", "u3"]);
     expect(deleted).toBe(2);
-    expect(await scores.exists("u1")).toBe(false);
+    expect(await scores.get("u1")).toBeUndefined();
   });
 
   it("supports AST-based JSON filtering and sorting in Redis", async () => {
-    const users = db.table("users");
-    await users.set("a", { age: 30, tag: "dev", level: 1 });
-    await users.set("b", { age: 20, tag: "dev", level: 2 });
-    await users.set("c", { age: 40, tag: "ops", level: 3 });
+    const products = db.table<{ title: string; price: number; inStock: boolean }>("products");
+    await products.setMany([
+      { key: "p1", value: { title: "Laptop", price: 1200, inStock: true } },
+      { key: "p2", value: { title: "Headphones", price: 150, inStock: true } },
+      { key: "p3", value: { title: "Mouse", price: 40, inStock: false } },
+    ]);
 
-    const devs = await users.find({
-      where: { tag: "dev", age: { $gte: 20 } },
-      sort: [{ path: "age", direction: "desc" }],
+    const filtered = await products.find({
+      where: { inStock: true, price: { $gte: 100 } },
+      sort: [{ path: "price", direction: "desc" }],
     });
 
-    expect(devs).toEqual([
-      { key: "a", value: { age: 30, tag: "dev", level: 1 } },
-      { key: "b", value: { age: 20, tag: "dev", level: 2 } },
-    ]);
+    expect(filtered).toHaveLength(2);
+    expect(filtered[0]?.key).toBe("p1");
+    expect(filtered[1]?.key).toBe("p2");
   });
 
   it("supports atomic updates under concurrency", async () => {
@@ -93,14 +100,14 @@ describe("Redis Driver and KVDB Integration", () => {
   });
 });
 
-describe("RedisStore standalone Cache subsystem", () => {
+runIntegration("RedisStore standalone Cache subsystem (set KVDB_TEST_REDIS_URL to run)", () => {
   let cache: Cache;
 
   beforeEach(async () => {
     cache = new Cache({
       stores: [
         new RedisStore({
-          url: REDIS_URL,
+          url: REDIS_URL!,
           keyPrefix: "test_cache:",
         }),
       ],
@@ -110,6 +117,7 @@ describe("RedisStore standalone Cache subsystem", () => {
 
   afterEach(async () => {
     await cache.clear();
+    await cache.close();
   });
 
   it("performs cache get, set, delete, and prefix deletion", async () => {

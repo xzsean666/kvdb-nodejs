@@ -14,7 +14,10 @@ export class RedisStore implements KVStore {
     if (!this.driver) {
       if (!this.driverPromise) {
         const factory = new RedisDriverFactory(this.options);
-        this.driverPromise = factory.connect() as Promise<RedisDriver>;
+        this.driverPromise = (factory.connect() as Promise<RedisDriver>).catch((err) => {
+          this.driverPromise = undefined;
+          throw err;
+        });
       }
       this.driver = await this.driverPromise;
     }
