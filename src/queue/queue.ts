@@ -379,10 +379,9 @@ export class Queue<Payload = unknown, Result = unknown> {
   }
 
   /**
-   * Get queue statistics by state with bounded query protection to prevent memory OOM.
+   * Get queue statistics by state using high-performance native database count aggregation.
    */
-  async getStats(options: { limit?: number } = {}): Promise<QueueStats> {
-    const limit = options.limit ?? 10_000;
+  async getStats(_options: { limit?: number } = {}): Promise<QueueStats> {
     const states: JobState[] = ["waiting", "active", "delayed", "completed", "failed"];
     const stats: QueueStats = {
       waiting: 0,
@@ -393,10 +392,15 @@ export class Queue<Payload = unknown, Result = unknown> {
       total: 0,
     };
 
-    for (const s of states) {
-      const items = await this.table.findRecords({ where: { state: s }, limit });
-      stats[s] = items.length;
-      stats.total += items.length;
+    const counts = await Promise.all(
+      states.map((s) => this.table.count({ where: { state: s } })),
+    );
+
+    for (let i = 0; i < states.length; i++) {
+      const s = states[i]!;
+      const c = counts[i]!;
+      stats[s] = c;
+      stats.total += c;
     }
 
     return stats;
@@ -405,7 +409,7 @@ export class Queue<Payload = unknown, Result = unknown> {
   /**
    * Re-queue failed jobs back to waiting.
    */
-  async retryFailed(jobId?: string): Promise<number> {
+  async retryFailed(jobId?: string, options: { limit?: number } = {}): Promise<number> {
     const now = Date.now();
     if (jobId) {
       const record = await this.table.getRecord(jobId);
@@ -423,7 +427,8 @@ export class Queue<Payload = unknown, Result = unknown> {
       return 0;
     }
 
-    const failedRecords = await this.table.findRecords({ where: { state: "failed" } });
+    const limit = options.limit ?? 500;
+    const failedRecords = await this.table.findRecords({ where: { state: "failed" }, limit });
     for (const r of failedRecords) {
       await this.table.update(String(r.key), (c) => ({ ...c, error: undefined, stack: undefined }), {
         keys: {
@@ -439,24 +444,35 @@ export class Queue<Payload = unknown, Result = unknown> {
   }
 
   /**
-   * Clean old completed or failed jobs.
+   * Clean old completed or failed jobs with batch chunking protection.
    */
-  async clean(options: { olderThanMs?: number; states?: JobState[] } = {}): Promise<number> {
+  async clean(options: { olderThanMs?: number; states?: JobState[]; limit?: number } = {}): Promise<number> {
     const olderThanMs = options.olderThanMs ?? 86_400_000; // default 24h
     const targetStates = options.states ?? ["completed", "failed"];
     const cutoff = Date.now() - olderThanMs;
+    const limit = options.limit ?? 1000;
 
-    const toClean = await this.table.findRecords({
-      where: {
-        $and: [
-          { state: { $in: targetStates } },
-          { updatedAt: { $lte: cutoff } },
-        ],
-      },
-    });
+    let totalDeleted = 0;
+    while (true) {
+      const toClean = await this.table.findRecords({
+        where: {
+          $and: [
+            { state: { $in: targetStates } },
+            { updatedAt: { $lte: cutoff } },
+          ],
+        },
+        limit,
+      });
 
-    if (toClean.length === 0) return 0;
-    return this.table.deleteMany(toClean.map((r) => r.key));
+      if (toClean.length === 0) break;
+      const deleted = await this.table.deleteMany(toClean.map((r) => r.key));
+      totalDeleted += deleted;
+      if (toClean.length < limit || options.limit !== undefined) {
+        break;
+      }
+    }
+
+    return totalDeleted;
   }
 
   private toJob(record: PhysicalRecord<QueueColumns, JobData<Payload, Result>>): Job<Payload, Result> {

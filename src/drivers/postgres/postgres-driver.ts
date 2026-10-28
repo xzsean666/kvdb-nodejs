@@ -353,6 +353,21 @@ export class PostgresDriver implements Driver {
     return result.rows.map((row) => ({ key: row.key, value: row.value }));
   }
 
+  async count(where: QueryNode, keyPrefix?: string): Promise<number> {
+    const compiled = compileWhere(where, this.dialect);
+    const params: unknown[] = [...compiled.params];
+    const nowIndex = params.push(Date.now());
+
+    let sql = `SELECT COUNT(*) AS count FROM "${this.table}"
+       WHERE ("expires_at" IS NULL OR "expires_at" > $${nowIndex}) AND (${compiled.sql})`;
+    if (keyPrefix) {
+      sql += ` AND "key" LIKE $${params.push(`${escapeLike(keyPrefix)}%`)}`;
+    }
+
+    const result = await this.pool.query<{ count: string | number }>(sql, params);
+    return Number(result.rows[0]?.count ?? 0);
+  }
+
   async ensureIndex(jsonPath: string): Promise<void> {
     const path = parsePath(jsonPath);
     const safe = jsonPath.replace(/[^A-Za-z0-9]/g, "_");
@@ -806,6 +821,18 @@ class PostgresSchemaTable<Columns extends Record<string, unknown>> implements Sc
       value: row.value as string,
       columns: this.parseColumns(row),
     }));
+  }
+
+  async count(where: QueryNode): Promise<number> {
+    validateQueryColumns(where, this.schema);
+    const dialect = new PostgresDialect("value");
+    const compiled = compileWhere(where, dialect);
+    const params: unknown[] = [...compiled.params];
+    const nowIdx = params.push(Date.now());
+
+    const sql = `SELECT COUNT(*) AS count FROM "${this.table}" WHERE ("expires_at" IS NULL OR "expires_at" > $${nowIdx}) AND (${compiled.sql})`;
+    const result = await this.pool.query<{ count: string | number }>(sql, params);
+    return Number(result.rows[0]?.count ?? 0);
   }
 
   async addKey(name: string, definition: KeyDefinition): Promise<void> {

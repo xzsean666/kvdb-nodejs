@@ -7,13 +7,43 @@
 
 ## 1. 核心状态概要
 
-- **当前 Goal**: 生产环境深度缺陷与短板全量加固 (TASK-033-PRODUCTION-AUDIT-REMEDIATION)
-- **当前 Task**: 实施 14 项生产缺陷与稳定性短板全面修复
-- **当前状态**: **COMPLETED_AND_VERIFIED** (4 项 P0 阻断隐患、5 项 P1 稳定性短板、5 项 P2 安全与运维功能全部修复完成。264 项单测 100% 通过，26 个官方实战示例全部平稳通过，双产物构建保持 229KB 轻量体积)
+- **当前 Goal**: 生产缺陷全面修复与高可用性能升级 (TASK-034-PRODUCTION-HARDENING-UPGRADE)
+- **当前 Task**: 实施 WriteBatcher 生命周期、Table.count() 原生下推、Queue 防 OOM 改造、Redis/MySQL 性能与语法加固
+- **当前状态**: **COMPLETED_AND_VERIFIED** (1 项 P0 阻断缺陷、2 项 P1 性能隐患、2 项 P2 语法与安全加固全部完成。271 项单测 100% 绿灯，官方 26 个实战示例 100% 成功运行)
 
 ---
 
-## 2. 本次任务交付清单 (TASK-033-PRODUCTION-AUDIT-REMEDIATION)
+## 2. 本次任务交付清单 (TASK-034-PRODUCTION-HARDENING-UPGRADE)
+
+### A. 致命生产阻断缺陷修复 (P0 Blocker)
+1. **`WriteBatcher` 防抖定时器生命周期修复 (`src/core/batcher.ts`)**:
+   - 彻底移除了破坏现代 Node.js 22/24/26 事件循环的 `this.timer.unref?.()`。
+   - 保证了在任何独立 ESM 脚本、Serverless 任务或服务启动阶段执行 `await table.set(...)` 时，事件循环能正常等待 20ms 微批防抖完成，彻底根除了 `Detected unsettled top-level await` (Exit Code 13) 崩溃。
+   - 官方 26 个实战示例从原先的 13 个崩溃恢复为 26 个全部 100% 成功通过。
+
+### B. 高可用与性能架构升级 (P1)
+1. **核心契约与驱动层 `count()` 原生下推 (`src/drivers/types.ts`, `src/core/table.ts`, 各驱动实现)**:
+   - 扩展了 `Driver` 与 `SchemaTableDriver` 契约，引入 `count(where, keyPrefix?)`。
+   - 在 `Table` 暴露 `await table.count(query)`，支持查询缓存集成（`queryCachePrefix + "count:"`）。
+   - 在 SQLite、PostgreSQL、MySQL、MongoDB 全量实现原生 `SELECT COUNT(*)` 与 `countDocuments()` 下推，零全量行拉取与反序列化开销。
+2. **任务队列 `Queue.getStats()` 资源防 OOM 重构 (`src/queue/queue.ts`)**:
+   - 重构 `getStats()` 为 5 次并行的底层原生 `table.count({ where: { state: s } })`。
+   - 将先前拉取最多 50,000 条完整任务实体（包含大 JSON payload）的严重内存开销彻底降低为毫秒级元数据聚合。
+3. **任务队列 `clean()` 与 `retryFailed()` 批量流转保护 (`src/queue/queue.ts`)**:
+   - 废除全表加载，引入默认 `limit: 500` 与 `limit: 1000` 的安全分批执行循环，防止海量积压任务下的内存溢出与长事务锁冲突。
+4. **Redis 驱动 `find()` 复杂度与安全重构 (`src/drivers/redis/redis-driver.ts`)**:
+   - 废除嵌套 `.find()` 算法，采用 Map 构建 $O(1)$ 查找字典，检索计算复杂度从 $O(N^2)$ 降低到 $O(N)$。
+   - 为 `scanKeys` 引入保护性上限（默认 10,000 条），防止在千万级键的 Redis 实例上引发严重性能雪崩。
+
+### C. 语法规范与安全加固 (P2)
+1. **MySQL JSON Path 特殊字符语法错误防御 (`src/drivers/mysql/dialect.ts`)**:
+   - 针对包含 `-` 或特殊符号的 JSON 属性名，自动格式化为 `$."user-name"`，杜绝 MySQL 5.7/8.0 `ER_JSON_SYNTAX_ERROR`。
+2. **全量专项回归测试套件 (`test/unit/production-hardening-upgrade.test.ts`)**:
+   - 涵盖原生 `count()`、QueryCache 联动失效、`Queue` 统计防爆破与 MySQL JSON 路径转义，单测增至 271 项。
+
+---
+
+## 3. 前次任务交付清单 (TASK-033-PRODUCTION-AUDIT-REMEDIATION)
 
 ### A. 4 项致命生产阻断缺陷修复 (P0 Blockers)
 1. **`db.getDriver()` 与 `Table.schemaDriver()` 连接异常死锁清除 (`src/core/kvdb.ts`, `src/core/table.ts`)**:

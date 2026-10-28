@@ -330,6 +330,21 @@ export class MysqlDriver implements Driver {
     return rows.map((r) => ({ key: r.key, value: r.value }));
   }
 
+  async count(where: QueryNode, keyPrefix?: string): Promise<number> {
+    const compiled = compileWhere(where, this.dialect);
+    const clauses = [`(\`expires_at\` IS NULL OR \`expires_at\` > ?)`, `(${compiled.sql})`];
+    const params: unknown[] = [Date.now(), ...compiled.params];
+
+    if (keyPrefix) {
+      clauses.push(`\`key\` LIKE ?`);
+      params.push(`${escapeLike(keyPrefix)}%`);
+    }
+
+    const sql = `SELECT COUNT(*) AS count FROM \`${this.table}\` WHERE ${clauses.join(" AND ")}`;
+    const [rows] = await this.pool.query<RowDataPacket[]>(sql, params);
+    return Number((rows[0] as any)?.count ?? 0);
+  }
+
   async update(key: string, mutate: UpdateMutator): Promise<void> {
     const conn = await this.pool.getConnection();
     try {
@@ -741,6 +756,16 @@ class MysqlSchemaTable<Columns extends Record<string, unknown>>
       value: row.value as string,
       columns: this.parseColumns(row as Record<string, unknown>),
     }));
+  }
+
+  async count(where: QueryNode): Promise<number> {
+    const dialect = new MysqlDialect("value");
+    const compiled = compileWhere(where, dialect);
+    const params: unknown[] = [Date.now(), ...compiled.params];
+
+    const sql = `SELECT COUNT(*) AS count FROM \`${this.table}\` WHERE (\`expires_at\` IS NULL OR \`expires_at\` > ?) AND (${compiled.sql})`;
+    const [rows] = await this.pool.query<RowDataPacket[]>(sql, params);
+    return Number((rows[0] as any)?.count ?? 0);
   }
 
   async updateRecord(

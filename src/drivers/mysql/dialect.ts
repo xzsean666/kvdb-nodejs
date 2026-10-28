@@ -62,11 +62,17 @@ function quoteIdentifier(value: string): string {
   return `\`${value}\``;
 }
 
-/** Render a FieldPath as a MySQL JSON path string, e.g. `$.profile.age` / `$.tags[0]`. */
+/** Render a FieldPath as a MySQL JSON path string, e.g. `$.profile.age` / `$.tags[0]` / `$."user-name"`. */
 function jsonPath(path: FieldPath): string {
   let result = "$";
   for (const segment of path.segments) {
-    result += "index" in segment ? `[${segment.index}]` : `.${segment.key}`;
+    if ("index" in segment) {
+      result += `[${segment.index}]`;
+    } else {
+      result += /^[A-Za-z_][A-Za-z0-9_]*$/.test(segment.key)
+        ? `.${segment.key}`
+        : `."${segment.key}"`;
+    }
   }
   return result;
 }

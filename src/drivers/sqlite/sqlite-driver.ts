@@ -295,6 +295,30 @@ class SqliteDriver implements Driver {
     return rows.map((row) => ({ key: row.key, value: row.value }));
   }
 
+  count(where: QueryNode, keyPrefix?: string): number {
+    const compiled = compileWhere(where, this.dialect);
+    const clauses = [`("expires_at" IS NULL OR "expires_at" > ?)`, `(${compiled.sql})`];
+    const params: unknown[] = [Date.now(), ...compiled.params];
+    if (keyPrefix) {
+      clauses.push(`"key" LIKE ? ESCAPE '\\'`);
+      params.push(`${escapeLike(keyPrefix)}%`);
+    }
+
+    const sql = `SELECT COUNT(*) AS c FROM ${quoteIdent(this.table)} WHERE ${clauses.join(" AND ")}`;
+    let stmt = this.queryStatements.get(sql);
+    if (!stmt) {
+      if (this.queryStatements.size >= 128) {
+        const oldest = this.queryStatements.keys().next().value;
+        if (oldest !== undefined) this.queryStatements.delete(oldest);
+      }
+      stmt = this.database.prepare(sql);
+      this.queryStatements.set(sql, stmt);
+    }
+
+    const row = stmt.get(...params) as { c: number };
+    return row.c;
+  }
+
   ensureIndex(jsonPath: string): void {
     this.queryStatements.clear();
     const path = parsePath(jsonPath);
@@ -799,6 +823,29 @@ class SqliteSchemaTable<Columns extends Record<string, unknown>>
         columns,
       };
     });
+  }
+
+  count(where: QueryNode): number {
+    validateQueryColumns(where, this.schema);
+    const dialect = new SqliteDialect("value");
+    const compiled = compileWhere(where, dialect);
+    const params: unknown[] = [Date.now(), ...compiled.params];
+    const sql = `SELECT COUNT(*) AS c FROM ${quoteIdent(
+      this.table,
+    )} WHERE ("expires_at" IS NULL OR "expires_at" > ?) AND (${compiled.sql})`;
+
+    let stmt = this.queryStatements.get(sql);
+    if (!stmt) {
+      if (this.queryStatements.size >= 128) {
+        const oldest = this.queryStatements.keys().next().value;
+        if (oldest !== undefined) this.queryStatements.delete(oldest);
+      }
+      stmt = this.database.prepare(sql);
+      this.queryStatements.set(sql, stmt);
+    }
+
+    const row = stmt.get(...params) as { c: number };
+    return row.c;
   }
 
   addKey(name: string, definition: KeyDefinition): void {

@@ -1060,6 +1060,55 @@ export class Table<Value = JsonValue, Columns extends Record<string, unknown> = 
     return result;
   }
 
+  /**
+   * Count records matching a query filter with native database-level aggregation.
+   */
+  async count(query: FindQuery = {}): Promise<number> {
+    if (this.writeBatcher && (this.writeBatcher.pendingCount > 0 || this.writeBatcher.isFlushingNow)) {
+      await this.writeBatcher.flush();
+    }
+    const qKey = this.queryCacheEnabled && this.deps.cache
+      ? `${this.queryCachePrefix}count:${canonicalQueryString(query)}`
+      : undefined;
+
+    if (qKey && this.deps.cache) {
+      const cached = await this.deps.cache.get<number>(qKey);
+      if (cached !== undefined) {
+        return cached;
+      }
+    }
+
+    let total: number;
+    const schema = await this.schemaDriver();
+    if (schema) {
+      const mergedWhere = {
+        ...(query.where ?? {}),
+        ...(query.columns ? { columns: query.columns } : {}),
+      };
+      const whereNode = parseSchemaWhere(mergedWhere, schema.schema);
+      if (schema.count) {
+        total = await schema.count(whereNode);
+      } else {
+        const rows = await schema.find(whereNode);
+        total = rows.length;
+      }
+    } else {
+      const driver = await this.deps.getDriver();
+      const whereParsed = parseWhere(query.where);
+      if (driver.count) {
+        total = await driver.count(whereParsed, namespacePrefix(this.deps.scope));
+      } else {
+        const entries = await driver.find(whereParsed, undefined, namespacePrefix(this.deps.scope));
+        total = entries.length;
+      }
+    }
+
+    if (qKey && this.deps.cache) {
+      await this.deps.cache.set(qKey, total, this.queryCacheTtlMs);
+    }
+    return total;
+  }
+
 
   async findRecords(query: FindQuery = {}): Promise<PhysicalRecord<Columns, Value>[]> {
     if (this.writeBatcher && (this.writeBatcher.pendingCount > 0 || this.writeBatcher.isFlushingNow)) {

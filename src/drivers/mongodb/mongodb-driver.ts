@@ -280,6 +280,15 @@ export class MongoDriver implements Driver {
     return docs.map((doc) => ({ key: doc._id, value: doc.value }));
   }
 
+  async count(where: QueryNode, keyPrefix?: string): Promise<number> {
+    const conditions: Record<string, unknown>[] = [
+      this.liveFilter(Date.now()),
+      compileMongoFilter(where),
+    ];
+    if (keyPrefix) conditions.push({ _id: { $regex: `^${escapeRegex(keyPrefix)}` } });
+    return this.collection.countDocuments({ $and: conditions });
+  }
+
   async ensureIndex(jsonPath: string): Promise<void> {
     await this.collection.createIndex({ [`doc.${jsonPath}`]: 1 });
   }
@@ -657,6 +666,15 @@ class MongoSchemaTable<Columns extends Record<string, unknown>> implements Schem
       value: doc.value as string,
       columns: this.extractColumns(doc),
     }));
+  }
+
+  async count(where: QueryNode): Promise<number> {
+    const now = Date.now();
+    const conditions: Record<string, unknown>[] = [
+      { $or: [{ expiresAt: null }, { expiresAt: { $gt: now } }] },
+      compileMongoFilter(where),
+    ];
+    return this.collection.countDocuments({ $and: conditions });
   }
 
   async addKey(name: string, definition: KeyDefinition): Promise<void> {

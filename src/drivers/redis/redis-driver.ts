@@ -336,13 +336,20 @@ export class RedisDriver implements Driver {
       result = result.slice(0, options.limit);
     }
 
-    return result.map((item) => {
-      const original = filtered.find((c) => c.key === item.key)!;
-      return {
-        key: original.key,
-        value: original.value,
-      };
-    });
+    const valueMap = new Map<string, string>();
+    for (const item of filtered) {
+      valueMap.set(item.key, item.value);
+    }
+
+    return result.map((item) => ({
+      key: item.key,
+      value: valueMap.get(item.key)!,
+    }));
+  }
+
+  async count(where: QueryNode, keyPrefix?: string): Promise<number> {
+    const results = await this.find(where, {}, keyPrefix);
+    return results.length;
   }
 
   async update(key: string, mutate: UpdateMutator): Promise<void> {
@@ -414,13 +421,14 @@ export class RedisDriver implements Driver {
     }
   }
 
-  private async scanKeys(pattern: string): Promise<string[]> {
+  private async scanKeys(pattern: string, maxLimit = 10_000): Promise<string[]> {
     let cursor = "0";
     const keys: string[] = [];
     do {
       const [nextCursor, batch] = await this.client.scan(cursor, "MATCH", pattern, "COUNT", 250);
       cursor = nextCursor;
       keys.push(...batch);
+      if (keys.length >= maxLimit) break;
     } while (cursor !== "0");
     return keys;
   }

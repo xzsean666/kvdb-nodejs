@@ -31,6 +31,8 @@ export interface SchemaTableDriver<Value = JsonValue, Columns extends Record<str
   delete(key: string | number): MaybePromise<boolean>;
   clear(): MaybePromise<void>;
   find(where: QueryNode, options?: FindOptions): MaybePromise<Array<{ key: string | number; value: string; columns: Record<string, unknown> }>>;
+  /** Count matching records using native database aggregation. */
+  count?(where: QueryNode): MaybePromise<number>;
   /** Optional atomic batch record insertion. */
   setRecords?(
     items: Array<{
@@ -116,6 +118,8 @@ export interface Driver extends KVStore {
    * physical table across every namespace).
    */
   find(where: QueryNode, options?: FindOptions, keyPrefix?: string): MaybePromise<KVEntry[]>;
+  /** Count matching entries using native database aggregation. */
+  count?(where: QueryNode, keyPrefix?: string): MaybePromise<number>;
 
   /** Ensure an index exists for a JSON path (expression/GIN index). No-op allowed. */
   ensureIndex(jsonPath: string): MaybePromise<void>;
