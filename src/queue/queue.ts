@@ -4,7 +4,9 @@ import { randomUUID } from "node:crypto";
 import type { KVDB } from "../core/kvdb.js";
 import type { Table } from "../core/table.js";
 import type { TableSchema, PhysicalRecord } from "../core/table-schema.js";
-import { KvdbQueueError } from "../core/errors.js";
+import { KvdbQueueError, KvdbConfigError } from "../core/errors.js";
+import { getNextCronTime } from "../schedule/cron-parser.js";
+import type { CronOrInterval, ScheduledJob, ScheduleOptions } from "../schedule/types.js";
 import type {
   Job,
   JobState,
@@ -271,6 +273,7 @@ export class Queue<Payload = unknown, Result = unknown> {
     }
 
     if (record.value.removeOnComplete) {
+      await this.triggerNextSchedule(jobId);
       return this.table.delete(jobId);
     }
 
@@ -288,6 +291,7 @@ export class Queue<Payload = unknown, Result = unknown> {
       },
     });
 
+    await this.triggerNextSchedule(jobId);
     return true;
   }
 
@@ -322,6 +326,7 @@ export class Queue<Payload = unknown, Result = unknown> {
           updatedAt: now,
         },
       });
+      await this.triggerNextSchedule(jobId);
       return false;
     }
 
@@ -473,6 +478,114 @@ export class Queue<Payload = unknown, Result = unknown> {
     }
 
     return totalDeleted;
+  }
+
+  /**
+   * Register a distributed recurring schedule (standard 5-field Cron or interval).
+   * Automatically enqueues the next delayed run into the queue.
+   */
+  async schedule(
+    name: string,
+    cronOrInterval: CronOrInterval,
+    payload: Payload,
+    options: ScheduleOptions = {},
+  ): Promise<ScheduledJob<Payload>> {
+    const now = Date.now();
+    let cron: string | undefined;
+    let everyMs: number | undefined;
+
+    if (typeof cronOrInterval === "string") {
+      cron = cronOrInterval;
+    } else {
+      cron = cronOrInterval.cron;
+      everyMs = cronOrInterval.everyMs;
+    }
+
+    if (!cron && (!everyMs || everyMs <= 0)) {
+      throw new KvdbConfigError("Schedule requires a valid cron expression or positive everyMs interval");
+    }
+
+    let nextRunAt: number;
+    if (cron) {
+      nextRunAt = getNextCronTime(cron, now);
+    } else {
+      nextRunAt = now + everyMs!;
+    }
+
+    const scheduledJob: ScheduledJob<Payload> = {
+      name,
+      queue: this.name,
+      cron,
+      everyMs,
+      payload,
+      options,
+      nextRunAt,
+      createdAt: now,
+    };
+
+    const scheduleTable = this.db.table<ScheduledJob<Payload>>("_kvdb_schedules", { autoBatch: false });
+    await scheduleTable.set(`${this.name}:${name}`, scheduledJob);
+
+    // Enqueue the delayed job with deterministic jobId to prevent duplicates
+    const jobId = `sched:${this.name}:${name}:${nextRunAt}`;
+    await this.push(payload, {
+      ...options,
+      jobId,
+      delayMs: Math.max(0, nextRunAt - now),
+    });
+
+    return scheduledJob;
+  }
+
+  /**
+   * Remove a recurring schedule.
+   */
+  async unschedule(name: string): Promise<boolean> {
+    const scheduleTable = this.db.table<ScheduledJob<Payload>>("_kvdb_schedules", { autoBatch: false });
+    return scheduleTable.delete(`${this.name}:${name}`);
+  }
+
+  /**
+   * List all registered schedules for this queue.
+   */
+  async listScheduled(): Promise<ScheduledJob<Payload>[]> {
+    const scheduleTable = this.db.table<ScheduledJob<Payload>>("_kvdb_schedules", { autoBatch: false });
+    const records = await scheduleTable.find();
+    return records
+      .filter((r) => r.value && r.value.queue === this.name)
+      .map((r) => r.value);
+  }
+
+  private async triggerNextSchedule(jobId: string): Promise<void> {
+    if (!jobId.startsWith(`sched:${this.name}:`)) return;
+    const parts = jobId.split(":");
+    const scheduleName = parts[2];
+    if (!scheduleName) return;
+
+    try {
+      const scheduleTable = this.db.table<ScheduledJob<Payload>>("_kvdb_schedules", { autoBatch: false });
+      const sched = await scheduleTable.get(`${this.name}:${scheduleName}`);
+      if (!sched) return;
+
+      const now = Date.now();
+      let nextRunAt = 0;
+      if (sched.cron) {
+        nextRunAt = getNextCronTime(sched.cron, now);
+      } else if (sched.everyMs) {
+        nextRunAt = now + sched.everyMs;
+      }
+
+      if (nextRunAt > 0) {
+        const nextJobId = `sched:${this.name}:${scheduleName}:${nextRunAt}`;
+        await this.push(sched.payload, {
+          ...sched.options,
+          jobId: nextJobId,
+          delayMs: Math.max(0, nextRunAt - now),
+        });
+      }
+    } catch {
+      // Best-effort schedule trigger
+    }
   }
 
   private toJob(record: PhysicalRecord<QueueColumns, JobData<Payload, Result>>): Job<Payload, Result> {

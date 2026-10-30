@@ -32,6 +32,8 @@ import { validateColumnValues } from "./table-schema.js";
 import type { SchemaTableDriver } from "../drivers/types.js";
 import { WriteBatcher, resolveAutoBatchOptions } from "./batcher.js";
 import type { AutoBatchOptions, BatchFlushPayload, BatchFlushResult } from "./batcher.js";
+import { createKeyvAdapter } from "../adapters/keyv.js";
+import type { KeyvStoreAdapter } from "../adapters/keyv.js";
 
 
 /** User-facing query document for `find` (parsed into the AST internally). */
@@ -48,6 +50,18 @@ export interface SetOptions<Columns = Record<string, unknown>> {
   ttlMs?: number;
   columns?: Partial<Columns> | Record<string, unknown>;
   keys?: Partial<Columns> | Record<string, unknown>;
+}
+
+export interface UpdateOptions<Columns = Record<string, unknown>, Value = unknown>
+  extends SetOptions<Columns> {
+  /**
+   * If true, inserts a new record with default/patch if the key does not exist.
+   */
+  upsert?: boolean;
+  /**
+   * Base value used when upserting a non-existent key.
+   */
+  default?: Value | (() => Value);
 }
 
 /**
@@ -458,7 +472,7 @@ export class Table<Value = JsonValue, Columns extends Record<string, unknown> = 
   async update(
     key: string | number,
     patch: UpdatePatch<Value>,
-    options: SetOptions = {},
+    options: UpdateOptions<Columns, Value> = {},
   ): Promise<Value> {
     const strKey = String(key);
 
@@ -467,10 +481,21 @@ export class Table<Value = JsonValue, Columns extends Record<string, unknown> = 
       const pending = this.writeBatcher.getPending(key);
       if (pending) {
         if (pending.type === "delete") {
-          throw new KvdbError(
-            "QUERY",
-            `Cannot update key "${key}" in namespace "${this.deps.schemaName ?? this.namespace}": it does not exist`,
-          );
+          if (!options.upsert) {
+            throw new KvdbError(
+              "QUERY",
+              `Cannot update key "${key}" in namespace "${this.deps.schemaName ?? this.namespace}": it does not exist`,
+            );
+          }
+          const base = typeof options.default === "function" ? (options.default as any)() : options.default;
+          const written = applyPatch(base as Value, patch);
+          const writtenTtl = options.ttlMs;
+          await this.set(key, written, {
+            ...options,
+            ttlMs: writtenTtl,
+            keys: (options.keys ?? options.columns) as any,
+          });
+          return written;
         }
         const currentVal = pending.item?.value as Value;
         const written = applyPatch(currentVal, patch);
@@ -498,10 +523,21 @@ export class Table<Value = JsonValue, Columns extends Record<string, unknown> = 
       if (schema.updateRecord) {
         await schema.updateRecord(key, (current) => {
           if (current === undefined) {
-            throw new KvdbError(
-              "QUERY",
-              `Cannot update key "${key}" in namespace "${this.deps.schemaName ?? this.namespace}": it does not exist`,
-            );
+            if (!options.upsert) {
+              throw new KvdbError(
+                "QUERY",
+                `Cannot update key "${key}" in namespace "${this.deps.schemaName ?? this.namespace}": it does not exist`,
+              );
+            }
+            const base = typeof options.default === "function" ? (options.default as any)() : options.default;
+            written = applyPatch(base as Value, patch);
+            writtenTtl = options.ttlMs;
+            const colsToUpdate = options.keys ?? options.columns;
+            return {
+              value: serialize(written as JsonValue),
+              ttlMs: writtenTtl,
+              columns: colsToUpdate as Record<string, unknown> | undefined,
+            };
           }
           written = applyPatch(deserialize<Value>(current.value), patch);
           writtenTtl = options.ttlMs ?? ttlFromExpiry(current.expiresAt);
@@ -515,16 +551,24 @@ export class Table<Value = JsonValue, Columns extends Record<string, unknown> = 
       } else {
         const record = await schema.getRecord(key);
         if (record === undefined) {
-          throw new KvdbError(
-            "QUERY",
-            `Cannot update key "${key}" in namespace "${this.deps.schemaName ?? this.namespace}": it does not exist`,
-          );
+          if (!options.upsert) {
+            throw new KvdbError(
+              "QUERY",
+              `Cannot update key "${key}" in namespace "${this.deps.schemaName ?? this.namespace}": it does not exist`,
+            );
+          }
+          const base = typeof options.default === "function" ? (options.default as any)() : options.default;
+          written = applyPatch(base as Value, patch);
+          writtenTtl = options.ttlMs;
+          const colsToUpdate = (options.keys ?? options.columns) as Record<string, unknown> | undefined;
+          await schema.setRecord(key, serialize(written as JsonValue), colsToUpdate ?? {}, writtenTtl);
+        } else {
+          written = applyPatch(deserialize<Value>(record.value), patch);
+          writtenTtl = options.ttlMs ?? ttlFromExpiry(record.expiresAt);
+          const colsToUpdate = (options.keys ?? options.columns) as Record<string, unknown> | undefined;
+          const mergedCols = colsToUpdate ? { ...record.columns, ...colsToUpdate } : record.columns;
+          await schema.setRecord(key, serialize(written as JsonValue), mergedCols, writtenTtl);
         }
-        written = applyPatch(deserialize<Value>(record.value), patch);
-        writtenTtl = options.ttlMs ?? ttlFromExpiry(record.expiresAt);
-        const colsToUpdate = (options.keys ?? options.columns) as Record<string, unknown> | undefined;
-        const mergedCols = colsToUpdate ? { ...record.columns, ...colsToUpdate } : record.columns;
-        await schema.setRecord(key, serialize(written as JsonValue), mergedCols, writtenTtl);
       }
 
       if (this.deps.cache) await this.deps.cache.set(cKey, written, writtenTtl);
@@ -546,15 +590,22 @@ export class Table<Value = JsonValue, Columns extends Record<string, unknown> = 
     // Pure read→merge→serialize, run by the driver under the row lock.
     const mutate = (current: RawEntry | undefined): UpdateResult => {
       if (current === undefined) {
-        throw new KvdbError(
-          "QUERY",
-          `Cannot update key "${strKey}" in namespace "${this.namespace}": it does not exist`,
-        );
+        if (!options.upsert) {
+          throw new KvdbError(
+            "QUERY",
+            `Cannot update key "${strKey}" in namespace "${this.namespace}": it does not exist`,
+          );
+        }
+        const base = typeof options.default === "function" ? (options.default as any)() : options.default;
+        written = applyPatch(base as Value, patch);
+        writtenTtl = options.ttlMs;
+        return { value: serialize(written as JsonValue), ttlMs: writtenTtl };
       }
       written = applyPatch(deserialize<Value>(current.value), patch);
       writtenTtl = options.ttlMs ?? ttlFromExpiry(current.expiresAt);
       return { value: serialize(written), ttlMs: writtenTtl };
     };
+
 
     if (driver.update) {
       await driver.update(cKey, mutate);
@@ -1251,6 +1302,77 @@ export class Table<Value = JsonValue, Columns extends Record<string, unknown> = 
     await schemaDriver.addIndex(definition);
     this.deps.schema = schemaDriver.schema;
   }
+
+  /**
+   * Atomically increment a numeric value or nested JSON property.
+   * If the key does not exist, starts from `default + amount` (default starts at 0).
+   */
+  async increment(
+    key: string | number,
+    amount: number = 1,
+    options: { path?: string; ttlMs?: number; default?: number } = {},
+  ): Promise<number> {
+    const initial = options.default ?? 0;
+    let finalValue = 0;
+
+    await this.update(
+      key,
+      (curr: any) => {
+        if (options.path) {
+          const obj = (curr && typeof curr === "object" && !Array.isArray(curr)) ? { ...curr } : {};
+          const segments = options.path.split(".");
+          let target = obj;
+          for (let i = 0; i < segments.length - 1; i++) {
+            const seg = segments[i]!;
+            if (!target[seg] || typeof target[seg] !== "object" || Array.isArray(target[seg])) {
+              target[seg] = {};
+            } else {
+              target[seg] = { ...target[seg] };
+            }
+            target = target[seg];
+          }
+          const lastSeg = segments[segments.length - 1]!;
+          const currentNum = typeof target[lastSeg] === "number"
+            ? target[lastSeg]
+            : (Number(target[lastSeg]) || initial);
+          finalValue = currentNum + amount;
+          target[lastSeg] = finalValue;
+          return obj as Value;
+        } else {
+          const currentNum = typeof curr === "number"
+            ? curr
+            : (curr !== undefined && !Number.isNaN(Number(curr)) ? Number(curr) : initial);
+          finalValue = currentNum + amount;
+          return finalValue as unknown as Value;
+        }
+      },
+      {
+        upsert: true,
+        ttlMs: options.ttlMs,
+        default: (options.path ? {} : initial) as any,
+      },
+    );
+
+    return finalValue;
+  }
+
+  /**
+   * Atomically decrement a numeric value or nested JSON property.
+   */
+  async decrement(
+    key: string | number,
+    amount: number = 1,
+    options: { path?: string; ttlMs?: number; default?: number } = {},
+  ): Promise<number> {
+    return this.increment(key, -amount, options);
+  }
+
+  /**
+   * Return a standards-compliant Keyv / Cache-Manager storage adapter view of this table.
+   */
+  asKeyv(): KeyvStoreAdapter<Value> {
+    return createKeyvAdapter(this);
+  }
 }
 
 
@@ -1259,7 +1381,8 @@ function applyPatch<Value>(current: Value, patch: UpdatePatch<Value>): Value {
   if (typeof patch === "function") {
     return (patch as (current: Value) => Value)(current);
   }
-  if (!isPlainObject(current) || !isPlainObject(patch)) {
+  const base = current !== undefined ? current : ({} as Value);
+  if (!isPlainObject(base) || !isPlainObject(patch)) {
     throw new KvdbError(
       "QUERY",
       "An object patch requires both the stored value and the patch to be plain " +
@@ -1271,8 +1394,9 @@ function applyPatch<Value>(current: Value, patch: UpdatePatch<Value>): Value {
     if (k === "__proto__" || k === "constructor" || k === "prototype") continue;
     safePatch[k] = (patch as Record<string, unknown>)[k];
   }
-  return { ...current, ...safePatch } as Value;
+  return { ...base, ...safePatch } as Value;
 }
+
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);

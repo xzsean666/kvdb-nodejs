@@ -9,7 +9,7 @@ export { KVDB } from "./core/kvdb.js";
 export type { KVDBOptions, KVDBDriverName, TableOptions, AlterTableOptions } from "./core/kvdb.js";
 
 export { Table } from "./core/table.js";
-export type { FindQuery, SetOptions, QueryCacheOptions } from "./core/table.js";
+export type { FindQuery, SetOptions, UpdateOptions, QueryCacheOptions } from "./core/table.js";
 
 // Driver contracts and the SQLite driver (for custom drivers / direct use).
 export type {
@@ -87,6 +87,9 @@ export {
   KvdbSchemaError,
   KvdbMigrationError,
   KvdbQueueError,
+  KvdbLockError,
+  KvdbRateLimitError,
+  KvdbIdempotencyError,
 } from "./core/errors.js";
 export type { KvdbErrorCode } from "./core/errors.js";
 
@@ -154,5 +157,26 @@ export type {
   BackoffOptions,
   JobProcessor,
 } from "./queue/types.js";
+
+// Distributed Lock & Mutex (docs/SPEC.md §17)
+export { LockManager } from "./lock/lock.js";
+export type { LockOptions, LockHandle, LockRecord } from "./lock/types.js";
+
+// Rate Limiter (docs/SPEC.md §19)
+export { RateLimiter } from "./limiter/rate-limiter.js";
+export type { RateLimiterOptions, RateLimitResult } from "./limiter/types.js";
+
+// Idempotency (docs/SPEC.md §20)
+export { IdempotencyManager } from "./idempotency/idempotent.js";
+export type { IdempotentOptions, IdempotencyRecord, IdempotencyStatus } from "./idempotency/types.js";
+
+// Distributed Cron & Schedule (docs/SPEC.md §21)
+export { parseCronExpression, getNextCronTime } from "./schedule/cron-parser.js";
+export type { ScheduledJob, ScheduleOptions, CronOrInterval } from "./schedule/types.js";
+
+// Keyv Ecosystem Adapter (docs/SPEC.md §22)
+export { createKeyvAdapter } from "./adapters/keyv.js";
+export type { KeyvStoreAdapter } from "./adapters/keyv.js";
+
 
 

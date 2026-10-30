@@ -504,4 +504,112 @@ const table = db.table("events", {
 4. **PostgreSQL 死锁杜绝**: 下发前对待写主键进行严格升序排序，使并发事务获取行锁方向单调一致，彻底杜绝交叉死锁。
 5. **优雅关闭与持久化保障**: `await table.flush()` 可显式排空；`await db.close()` 自动排空所有活跃表的批处理队列。
 
+---
+
+## 17. 分布式锁与互斥控制 (Distributed Lock & Mutex)
+
+为跨进程互斥、单实例任务执行、库存防超卖等场景提供零外部依赖的分布式互斥锁，支持 SQLite（含 `:memory:` 与物理文件）、PostgreSQL、MySQL、MongoDB、Redis 全量驱动。
+
+```ts
+// 作用域包装器（自动加锁、自动续期心跳、自动安全释放）
+const result = await db.withLock("lock:order:1001", async (lock) => {
+  // 执行受保护的业务代码
+  return await processOrder(1001);
+}, {
+  ttlMs: 10_000,         // 锁租约时间，默认 10,000ms
+  waitTimeoutMs: 5_000,   // 获取锁最大等待超时，默认 5,000ms
+  retryIntervalMs: 100,   // 重试间隔，默认 100ms
+  autoHeartbeat: true,    // 是否在持锁期间自动续期，默认 true
+});
+
+// 手动获取与释放
+const lock = await db.acquireLock("lock:cron:sync", { ttlMs: 15_000 });
+if (lock) {
+  try {
+    await runSync();
+  } finally {
+    await lock.release();
+  }
+}
+```
+
+---
+
+## 18. 高频原子数值计算 (Atomic Increment & Decrement)
+
+在 `Table` 提供不依赖全量反序列化与手动合并的极速原子数值计算：
+
+```ts
+// 标量纯数值累加/累减（若 key 不存在则从 default 开始计算）
+const newViews = await table.increment("article:101", 1, { default: 0 });
+const newPoints = await table.decrement("user:101", 5);
+
+// 嵌套 JSON 字段原子计算
+await table.increment("user:101", 10, { path: "metrics.likes" });
+```
+
+---
+
+## 19. 高性能业务与 API 限流器 (RateLimiter)
+
+基于滑动窗口近似算法（Sliding Window Counter）构建，跨全数据库一致：
+
+```ts
+const limiter = db.rateLimiter({
+  windowMs: 60_000, // 1 分钟窗口
+  limit: 100,       // 允许 100 次
+});
+
+const res = await limiter.consume(ip);
+// res: { allowed: true, remaining: 99, resetMs: 58200, current: 1, limit: 100 }
+if (!res.allowed) {
+  throw new KvdbRateLimitError("Too Many Requests");
+}
+```
+
+---
+
+## 20. 接口与任务幂等性守护器 (Idempotency Guard)
+
+防止支付 Webhook、表单重复点击导致的重复扣款或重复处理：
+
+```ts
+const result = await db.idempotent(`pay:order:${orderId}`, async () => {
+  return await chargePayment(orderId);
+}, {
+  ttlMs: 86400_000,    // 成功后缓存结果 24 小时
+  timeoutMs: 10_000,   // 并发相同 key 请求等待首个请求完成的最长时间
+});
+```
+
+---
+
+## 21. 分布式 Cron 定时任务调度器 (Distributed Cron Scheduler)
+
+基于持久化 `Queue` 扩展，标准 5 段 Cron 表达式解析，原生保证集群多节点 Exactly-Once 触发：
+
+```ts
+const queue = db.queue("reports");
+
+// 注册分布式 Cron
+await queue.schedule("daily-sync", "0 0 * * *", { type: "daily" });
+await queue.schedule("fast-pulse", "*/5 * * * *", { ping: true });
+
+// 列出与取消调度
+const scheduled = await queue.listScheduled();
+await queue.unschedule("daily-sync");
+```
+
+---
+
+## 22. Keyv 标准生态适配器 (Keyv Store Adapter)
+
+使任何数据库支持的 KVDB 表无缝兼容 Node.js 社区生态（Apollo Server, Cache-Manager, Unstorage 等）：
+
+```ts
+const store = table.asKeyv();
+// 符合 Keyv Storage Adapter 标准规范 (get, set, delete, clear, has)
+```
+
+
 

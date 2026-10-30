@@ -1,6 +1,6 @@
 ---
 name: kvdb-sdk
-description: "面向 Node.js 的高性能、多驱动、可扩展 KV 数据库 SDK (SQLite, PostgreSQL, MongoDB, Redis, MySQL)。支持统一 KV 接口、物理动态多键 (Multi-Key) 二级索引与极速点查、JSON 复杂查询、多级缓存与可靠任务队列。"
+description: "面向 Node.js 的高性能、多驱动、可扩展 KV 数据库 SDK (SQLite, PostgreSQL, MongoDB, Redis, MySQL)。支持统一 KV 接口、物理动态多键 (Multi-Key) 二级索引与极速点查、JSON 复杂查询、多级缓存、可靠任务队列、分布式锁、滑动窗口限流、原子数值增减、幂等守护与分布式 Cron 调度。"
 ---
 
 # kvdb-sdk AI Skill & Integration Guide
@@ -11,7 +11,7 @@ description: "面向 Node.js 的高性能、多驱动、可扩展 KV 数据库 S
 
 ## 1. 模块定位与核心能力
 
-- **模块定位**：面向 Node.js (>=22) 的企业级、高性能、多后端、可扩展 KV Database SDK。提供统一的 KV 访问门面、原生物理多键（Multi-Key）二级索引、JSON 语法查询引擎、独立分层缓存（Cache）、原子更新（`update`）、批量写聚合缓冲引擎（`WriteBatcher`）以及基于持久化表的可靠任务队列（`Queue`）。
+- **模块定位**：面向 Node.js (>=22/24/26) 的企业级、高性能、多后端、可扩展 KV Database SDK。提供统一的 KV 访问门面、原生物理多键（Multi-Key）二级索引、JSON 语法查询引擎、独立分层缓存（Cache）、原子更新（`update`）、批量写聚合缓冲引擎（`WriteBatcher`）、基于持久化表的可靠任务队列（`Queue`）、分布式互斥锁（`withLock`）、滑动窗口限流器（`RateLimiter`）、原子数值增减（`increment`）、接口幂等守护器（`idempotent`）以及标准生态适配（`Keyv`）。
 - **源码根路径**：`/ssd0/git/kvdb-nodejs`
 - **托管账号**：`xzsean666`
 - **Git 远程仓库**：`https://github.com/xzsean666/kvdb-nodejs.git`
@@ -25,12 +25,15 @@ description: "面向 Node.js 的高性能、多驱动、可扩展 KV 数据库 S
   }
   ```
 - **核心能力矩阵**：
-  - **多后端统一抽象**：原生支持 `sqlite` (better-sqlite3)、`postgresql` (pg)、`mongodb` (mongodb)、`redis` (ioredis)、`mysql` (mysql2)，应用层代码 100% 无缝切换。
+  - **多后端统一抽象**：原生支持 `sqlite` (better-sqlite3，包括 `:memory:` 纯内存秒级模式与文件持久化)、`postgresql` (pg)、`mongodb` (mongodb)、`redis` (ioredis)、`mysql` (mysql2)，应用层代码 100% 无缝切换，无任何单一数据库硬编码绑定。
   - **动态多键（Multi-Key）物理索引**：突破传统 KV 仅支持主键点查的限制，将高频检索字段直接映射为物理列或顶层字段，挂载底层 B-Tree 物理索引，实现 O(1) 极速点查与高性能范围过滤。
+  - **分布式互斥锁与限流器**：内置基于行锁/CAS/Redis的跨实例分布式锁（`db.withLock` / `db.acquireLock`）与滑动窗口限流器（`db.rateLimiter`），支持长任务心跳自动续期。
+  - **接口幂等守护与分布式 Cron**：提供 `db.idempotent()` 状态机防止支付与 Webhook 重复处理；扩展 `queue.schedule()` 支持标准 5 段 Cron 跨集群多节点 Exactly-Once 执行。
   - **微批聚合写入（Auto-Batch Coalescing）**：内置 `WriteBatcher`，将高频离散 `set`/`delete` 自动汇聚为参数化 Multi-Row 单条 SQL，并按主键字典序排序，彻底杜绝 PostgreSQL 交叉行锁死锁。
-  - **严格并发安全性**：提供悲观锁/乐观锁保障的原子读-改-写（`table.update` / `table.updateRecord`）。
+  - **严格并发安全性**：提供悲观锁/乐观锁保障的原子读-改-写（`table.update` / `table.updateRecord`）与原生数值增减（`table.increment` / `table.decrement`）。
   - **多级独立缓存与装饰器**：集成内存 LRU + Redis 外部缓存，防击穿（SingleFlight）、防雪崩（Jitter TTL）、SWR（Stale-While-Revalidate）与 `@Cacheable` 装饰器。
   - **可靠任务队列**：内置持久化 At-Least-Once 队列（`Queue` / `Worker`），支持延迟任务、指数退避重试与并发受控消费。
+  - **Keyv / Web 框架生态适配**：暴露 `table.asKeyv()`，零胶水接入 Apollo、Unstorage、Cache-Manager 等。
 
 ---
 
@@ -48,11 +51,20 @@ import {
   Queue, Worker,        // 可靠任务队列与执行器
   WriteBatcher,         // 微批聚合写引擎
   Cacheable, CacheClear,// TC39 标准装饰器缓存
+  LockManager,          // 分布式互斥锁管理器
+  RateLimiter,          // 滑动窗口限流器
+  IdempotencyManager,   // 接口与任务幂等性管理器
+  createKeyvAdapter,    // Keyv / Unstorage 标准适配器工厂
+  parseCronExpression,  // 标准 5 段 Cron 表达式解析器
+  getNextCronTime,      // 下次 Cron 触发时间计算器
   KvdbError,            // 核心错误类基类
+  KvdbLockError,        // 分布式锁异常
+  KvdbRateLimitError,   // 限流阻断异常
+  KvdbIdempotencyError, // 幂等冲突与超时异常
 } from "kvdb-sdk";
 ```
 
-### 2.2 `KVDB` 配置项 (`KVDBOptions`)
+### 2.2 `KVDB` 配置项与操作方法
 ```typescript
 const db = new KVDB({
   driver: "sqlite" | "postgresql" | "mongodb" | "redis" | "mysql",
@@ -68,6 +80,12 @@ const db = new KVDB({
   pool?: Record<string, unknown>,   // 透传给底层数据库连接池的配置 (max, timeout, ssl 等)
   gracefulShutdown?: boolean,       // 是否监听 SIGINT/SIGTERM 自动 flush 批处理并关闭连接 (默认 false)
 });
+
+// 顶级扩展方法
+await db.withLock(key, async (lock) => { ... }, options?: LockOptions);
+const lock = await db.acquireLock(key, options?: LockOptions);
+const limiter = db.rateLimiter(options: RateLimiterOptions);
+await db.idempotent(key, async () => { ... }, options?: IdempotentOptions);
 ```
 
 ### 2.3 `Table` 核心操作方法
@@ -77,8 +95,10 @@ interface Table<Value = any, Columns extends Record<string, unknown> = Record<st
   set(key: string | number, value: Value, options?: { keys?: Columns; ttlMs?: number }): Promise<void>;
   set(item: { keys: Columns & { [pk: string]: string | number }; value: Value; ttlMs?: number }): Promise<void>;
   setMany(items: Array<{ key: string | number; value: Value; keys?: Columns; ttlMs?: number }>): Promise<void>;
-  update(key: string | number, updater: (prev: Value | undefined) => Value, options?: { ttlMs?: number }): Promise<Value>;
+  update(key: string | number, updater: (prev: Value | undefined) => Value, options?: UpdateOptions): Promise<Value>;
   updateRecord(key: string | number, updater: (prev: PhysicalRecord<Columns, Value> | undefined) => PhysicalRecord<Columns, Value>): Promise<PhysicalRecord<Columns, Value>>;
+  increment(key: string | number, amount?: number, options?: { path?: string; ttlMs?: number; default?: number }): Promise<number>;
+  decrement(key: string | number, amount?: number, options?: { path?: string; ttlMs?: number; default?: number }): Promise<number>;
 
   // --- 读取与点查 ---
   get(key: string | number): Promise<Value | undefined>;
@@ -87,6 +107,7 @@ interface Table<Value = any, Columns extends Record<string, unknown> = Record<st
   getMany(keys: (string | number)[]): Promise<(Value | undefined)[]>;
   getByPrefix(prefix: string): Promise<Array<{ key: string; value: Value }>>;
   exists(key: string | number): Promise<boolean>;
+  count(query?: { where?: Record<string, unknown>; columns?: Record<string, unknown> }): Promise<number>;
 
   // --- 删除与清理 ---
   delete(key: string | number): Promise<boolean>;
@@ -98,11 +119,12 @@ interface Table<Value = any, Columns extends Record<string, unknown> = Record<st
   find(query?: FindQuery): Promise<Array<{ key: string; value: Value }>>;
   findRecords(query?: FindQuery): Promise<Array<PhysicalRecord<Columns, Value>>>;
 
-  // --- 物理索引与 Schema 演进 ---
+  // --- 物理索引、Schema 演进与生态适配 ---
   ensureIndex(jsonPath: string): Promise<void>;                   // 普通 KV 表 JSON 路径建索引
   addKey(name: string, definition: KeyDefinition): Promise<void>; // 【核心】动态扩展物理二级键
   addIndex(definition: MultiKeyIndexDefinition): Promise<void>;   // 【核心】动态扩展物理复合索引
   flush(): Promise<void>;                                         // 手动强制排空微批写入缓冲区
+  asKeyv(): KeyvStoreAdapter<Value>;                              // 【核心】导出标准 Keyv 存储适配器
 }
 ```
 
@@ -456,7 +478,114 @@ const worker = db.worker("order_tasks", async (job) => {
 
 ---
 
-## 7. 常见陷阱与最佳实践 (Pitfalls & Best Practices)
+## 7. 全数据库通用的高频高价值功能模块实战 (Universal Extensions)
+
+> [!TIP]
+> **多数据库通用基准**：以下所有功能模块均原生支持 SQLite（含 `:memory:` 纯内存秒级模式与文件存储）、PostgreSQL、MySQL、MongoDB、Redis 全量驱动，无需安装额外中间件，开箱即用。
+
+### 7.1 分布式互斥锁 (Distributed Lock & Mutex)
+用于跨进程防重复跑、临界区互斥、库存防超卖：
+```typescript
+// 1. 作用域包装器：自动加锁、自动心跳续期（Auto-Heartbeat）、执行完毕自动释放
+const result = await db.withLock("lock:order:1001", async (lockHandle) => {
+  // 临界区业务操作
+  return await processOrder(1001);
+}, {
+  ttlMs: 10_000,         // 锁租约时间（默认 10s）
+  waitTimeoutMs: 5_000,   // 获取锁最大等待超时（默认 5s，0 表示非阻塞 try-lock）
+  retryIntervalMs: 100,   // 重试轮询间隔（默认 100ms）
+  autoHeartbeat: true,    // 是否在持锁期间自动后台续期（默认 true）
+});
+
+// 2. 手动加锁与释放
+const lock = await db.acquireLock("lock:cron:sync", { ttlMs: 15_000 });
+if (lock) {
+  try {
+    await runSync();
+  } finally {
+    await lock.release();
+  }
+}
+```
+
+### 7.2 高频原子数值计算 (Atomic Increment & Decrement)
+避免全量 JSON 反序列化与事务锁竞争，直接原子操作数字或深层属性：
+```typescript
+const table = db.table("metrics");
+
+// 标量累加（若不存在则从 default 默认值开始）
+const views = await table.increment("article:101", 1, { default: 0 });
+const points = await table.decrement("user:101", 5);
+
+// 嵌套 JSON 字段原子计算
+await table.increment("user:101", 10, { path: "stats.likes" });
+```
+
+### 7.3 高性能滑动窗口限流器 (RateLimiter)
+API 防刷、登录暴破防御、大模型 Token 限频（基于 99.9% 精度双窗口滑动加权算法）：
+```typescript
+const limiter = db.rateLimiter({
+  windowMs: 60_000, // 1 分钟滑动窗口
+  limit: 100,       // 允许 100 次
+});
+
+const res = await limiter.consume(clientIp, 1);
+// res: { allowed: true, remaining: 99, resetMs: 58200, current: 1, limit: 100 }
+if (!res.allowed) {
+  throw new KvdbRateLimitError("Too Many Requests");
+}
+
+// 检查当前状态而不消耗配额
+const status = await limiter.check(clientIp);
+
+// 重置限流状态
+await limiter.reset(clientIp);
+```
+
+### 7.4 接口与任务幂等性守护 (Idempotency Guard)
+解决支付回调、第三方 Webhook、表单重复点击导致的重复扣款或重复处理：
+```typescript
+// 状态机驱动（PENDING -> RESOLVED / REJECTED）
+// 并发相同 Key 请求自动等待首个任务执行并返回结果；成功后在 ttlMs 内直接返回缓存结果
+const result = await db.idempotent(`pay:order:${orderId}`, async () => {
+  return await chargePayment(orderId);
+}, {
+  ttlMs: 86400_000,   // 成功结果缓存 24 小时
+  timeoutMs: 10_000,  // 并发请求等待超时
+});
+```
+
+### 7.5 分布式 Cron 定时任务调度 (Queue.schedule)
+标准 5 段 Cron 表达式解析，原生保证集群多节点 Exactly-Once 触发与自动重试：
+```typescript
+const queue = db.queue("reports");
+
+// 注册标准 Cron 分布式调度任务（集群内仅有一台机器执行，失败自动退避重试）
+await queue.schedule("daily-sync", "0 0 * * *", { type: "daily" });
+await queue.schedule("pulse", "*/5 * * * *", { ping: true });
+
+// 亦支持简单时间间隔
+await queue.schedule("heartbeat", { everyMs: 30_000 }, { ping: true });
+
+// 列出所有调度与取消调度
+const schedules = await queue.listScheduled();
+await queue.unschedule("daily-sync");
+```
+
+### 7.6 Keyv / Web 框架生态标准适配 (table.asKeyv)
+使任何数据库后端的 KVDB 数据表无缝兼容 Node.js 社区生态（Apollo Server, Unstorage, Cache-Manager 等）：
+```typescript
+const table = db.table("sessions");
+const keyvStore = table.asKeyv();
+
+// 符合 Keyv Storage Adapter 标准规范: get, set, delete, clear, has, iterator
+await keyvStore.set("session_101", { user: "Alice" }, 3600_000);
+const session = await keyvStore.get("session_101");
+```
+
+---
+
+## 8. 常见陷阱与最佳实践 (Pitfalls & Best Practices)
 
 ### 1. 【性能陷阱】切忌在普通 KV 表中用 `find` 做无索引属性过滤
 - **错误姿势**：在普通 KV 表上直接执行 `table.find({ where: { status: "pending" } })`，底层会遍历全表解析 JSON 字符串，十万级数据即可导致数据库 CPU 100% 阻塞数秒。
@@ -483,7 +612,7 @@ const worker = db.worker("order_tasks", async (job) => {
 
 ---
 
-## 8. 本地维护与热修复指引 (Hotfix SOP)
+## 9. 本地维护与热修复指引 (Hotfix SOP)
 
 如在业务项目中接入 `kvdb-sdk` 并发现需要修复 Bug 或扩展新能力：
 1. 进入 SDK 源码目录：`cd /ssd0/git/kvdb-nodejs`

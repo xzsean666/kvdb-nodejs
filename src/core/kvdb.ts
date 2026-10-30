@@ -35,6 +35,12 @@ import type { AutoBatchOptions } from "./batcher.js";
 import { Queue } from "../queue/queue.js";
 import { Worker } from "../queue/worker.js";
 import type { QueueOptions, WorkerOptions, JobProcessor } from "../queue/types.js";
+import { LockManager } from "../lock/lock.js";
+import type { LockHandle, LockOptions } from "../lock/types.js";
+import { RateLimiter } from "../limiter/rate-limiter.js";
+import type { RateLimiterOptions } from "../limiter/types.js";
+import { IdempotencyManager } from "../idempotency/idempotent.js";
+import type { IdempotentOptions } from "../idempotency/types.js";
 
 
 /** Driver names accepted in config (mirrors docs/SPEC.md and the README). */
@@ -109,6 +115,8 @@ export class KVDB {
   private readonly autoBatch: boolean | AutoBatchOptions | undefined;
   private readonly tableCache = new Map<string, Table<any, any>>();
   private readonly queueCache = new Map<string, Queue<any, any>>();
+  private lockManager?: LockManager;
+  private idempotencyManager?: IdempotencyManager;
   private readonly activeWorkers = new Set<Worker<any, any>>();
   private driverPromise: Promise<Driver> | undefined;
   private cleanupTimer: ReturnType<typeof setInterval> | undefined;
@@ -227,6 +235,51 @@ export class KVDB {
       this.activeWorkers.delete(w);
     });
     return w;
+  }
+
+  /**
+   * Acquire a distributed lock across all supported database backends.
+   */
+  async acquireLock(key: string, options?: LockOptions): Promise<LockHandle | null> {
+    if (!this.lockManager) {
+      this.lockManager = new LockManager(this);
+    }
+    return this.lockManager.acquireLock(key, options);
+  }
+
+  /**
+   * Execute an async function within a distributed lock scope.
+   */
+  async withLock<T>(
+    key: string,
+    fn: (handle: LockHandle) => Promise<T>,
+    options?: LockOptions,
+  ): Promise<T> {
+    if (!this.lockManager) {
+      this.lockManager = new LockManager(this);
+    }
+    return this.lockManager.withLock(key, fn, options);
+  }
+
+  /**
+   * Create a Sliding Window Rate Limiter.
+   */
+  rateLimiter(options: RateLimiterOptions): RateLimiter {
+    return new RateLimiter(this, options);
+  }
+
+  /**
+   * Execute an operation idempotently with automatic concurrency collapsing and result caching.
+   */
+  async idempotent<T>(
+    key: string,
+    fn: () => Promise<T>,
+    options?: IdempotentOptions,
+  ): Promise<T> {
+    if (!this.idempotencyManager) {
+      this.idempotencyManager = new IdempotencyManager(this);
+    }
+    return this.idempotencyManager.idempotent(key, fn, options);
   }
 
   /** Delete a physical schema table and its registry metadata. */

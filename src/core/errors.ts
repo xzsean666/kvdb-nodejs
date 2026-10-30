@@ -76,3 +76,25 @@ export class KvdbQueueError extends KvdbError {
     this.name = "KvdbQueueError";
   }
 }
+
+export class KvdbLockError extends KvdbError {
+  constructor(message: string, options?: { cause?: unknown }) {
+    super("QUERY", message, options);
+    this.name = "KvdbLockError";
+  }
+}
+
+export class KvdbRateLimitError extends KvdbError {
+  constructor(message: string, options?: { cause?: unknown }) {
+    super("QUERY", message, options);
+    this.name = "KvdbRateLimitError";
+  }
+}
+
+export class KvdbIdempotencyError extends KvdbError {
+  constructor(message: string, options?: { cause?: unknown }) {
+    super("QUERY", message, options);
+    this.name = "KvdbIdempotencyError";
+  }
+}
+

@@ -44,12 +44,13 @@
 | **TASK-032-PRODUCTION-READY** | 生产就绪度深度审计与工业级生产加固 | M3 | **DONE** | TASK-031-SECURITY-PERF-HARDENING | `src/*`, `test/*`, `package.json` |
 | **TASK-033-PRODUCTION-AUDIT-REMEDIATION** | 生产环境深度缺陷与短板全量加固 | M3+ | **DONE** | TASK-032-PRODUCTION-READY | `src/*`, `test/*`, `package.json` |
 | **TASK-034-PRODUCTION-HARDENING-UPGRADE** | 生产缺陷全面修复与高可用性能升级 | M3+ | **DONE** | TASK-033-PRODUCTION-AUDIT-REMEDIATION | `src/*`, `test/*`, `docs/*` |
+| **TASK-035-UNIVERSAL-DEVELOPER-EXTENSIONS** | 全数据库通用的高频高价值开发者功能模块扩展 | M3+ | **DONE** | TASK-034-PRODUCTION-HARDENING-UPGRADE | `src/lock/*`, `src/limiter/*`, `src/idempotency/*`, `src/schedule/*`, `src/adapters/*`, `src/core/*` |
 
 ---
 
 ## 2. 状态流转总览
 
-- **已完成 (DONE)**: TASK-001 ~ TASK-034 全部任务 (共 34 项任务已 100% 全部完成交付)
+- **已完成 (DONE)**: TASK-001 ~ TASK-035 全部任务 (共 35 项任务已 100% 全部完成交付)
 - **进行中 (IN_PROGRESS)**: 0 项
 - **后续规划 (TODO)**: 0 项
 - **待审查/验证中 (REVIEW)**: 0 项
@@ -59,7 +60,7 @@
 
 ## 3. 当前主线执行链路
 
-### 当前主线: Milestone 3+ (工业级生产就绪专项)
+### 当前主线: Milestone 3+ (工业级生产就绪与高价值功能扩展)
 
 - **Milestone 1**: 核心 KV 存储与基础驱动架构 (100% DONE)
 - **Milestone 2**: 动态多键与物理索引架构 (100% DONE)
@@ -68,5 +69,7 @@
   - [x] TASK-031-SECURITY-PERF-HARDENING: 全面安全漏洞修复与架构性能深度优化 (DONE)
   - [x] TASK-032-PRODUCTION-READY: 生产就绪度深度审计与工业级生产加固 (DONE)
   - [x] TASK-033-PRODUCTION-AUDIT-REMEDIATION: 生产环境深度缺陷与短板全量加固 (DONE)
+  - [x] TASK-034-PRODUCTION-HARDENING-UPGRADE: 生产缺陷全面修复与高可用性能升级 (DONE)
+  - [x] TASK-035-UNIVERSAL-DEVELOPER-EXTENSIONS: 全数据库通用的高频高价值开发者功能模块扩展 (DONE)
 
 
