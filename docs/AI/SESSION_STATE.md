@@ -9,7 +9,7 @@
 
 - **当前 Goal**: 全数据库通用的高频高价值开发者功能模块扩展 (TASK-035-UNIVERSAL-DEVELOPER-EXTENSIONS)
 - **当前 Task**: 实施分布式锁 (Lock/Mutex)、原子数值增减 (Increment/Decrement)、业务限流器 (RateLimiter)、接口幂等守护器 (Idempotency)、分布式 Cron 定时调度 (Queue.schedule) 与 Keyv 适配器，支持 SQLite 内存模式及全数据库基准
-- **当前状态**: **COMPLETED_AND_VERIFIED** (6 项高价值通用功能模块全部交付，286 项单元测试与 26 个官方实战示例全部 100% 绿灯通过，SPEC 与 SKILL 文档同步完成)
+- **当前状态**: **COMPLETED_AND_VERIFIED** (6 项高价值通用功能模块全部交付，297 项单元测试与 26 个官方实战示例全部 100% 绿灯通过，SPEC 与 SKILL 文档同步完成)
 
 ---
 
@@ -42,8 +42,14 @@
 ### B. 质量验证与基准对齐
 1. **多驱动与 SQLite 内存模式覆盖**:
    - 新增 `test/unit/universal-extensions.test.ts`，涵盖全部 6 大新增功能模块共 15 项测试，100% 运行于 SQLite `:memory:` 纯内存模式，证明零外部硬件/磁盘强依赖。
-2. **全量回归保障**:
-   - 286 项全量单元测试 100% 通过。
+2. **高并发竞态与压力严苛验证**:
+   - 新增 `test/unit/universal-extensions-deep.test.ts`，涵盖 11 项深度压力测试：
+     - 50 个高并发原子增减零丢失更新；
+     - 两个独立 KVDB 实例在磁盘持久化文件上的跨进程互斥、持锁续期与租约超时自动接管（Lease Recovery）；
+     - 10 个高并发相同请求瞬间到达时，底层重型计算仅执行 1 次并原子分发结果；
+     - 突发流量限流拦截与多 Key 隔离。
+3. **全量回归保障**:
+   - 297 项全量单元测试 100% 通过（29 个测试套件全绿）。
    - 26 个官方实战示例 100% 成功运行。
    - TypeScript 严格类型检查零错误，ESM/CJS 双产物打包平稳（产物轻量为 ~260KB）。
 

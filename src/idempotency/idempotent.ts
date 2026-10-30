@@ -32,6 +32,13 @@ export class IdempotencyManager {
     const startTime = Date.now();
 
     while (true) {
+      // 1. Fast read path: if already resolved, return immediately without write contention
+      const cached = await this.table.get(key);
+      if (cached?.status === "resolved") {
+        return cached.result as T;
+      }
+
+      // 2. Try to claim execution as the primary worker
       let isClaimer = false;
       let existingRecord: IdempotencyRecord | undefined;
 
@@ -73,7 +80,7 @@ export class IdempotencyManager {
           return result;
         } catch (err: any) {
           const errMsg = err?.message ?? String(err);
-          // Mark as rejected with short TTL so it can be retried shortly
+          // Mark as rejected so concurrent callers can detect the failure or retry
           await this.table
             .update(
               key,
@@ -82,36 +89,40 @@ export class IdempotencyManager {
                 error: errMsg,
                 createdAt: Date.now(),
               }),
-              { ttlMs: 5_000 },
+              { ttlMs: 10_000 },
             )
             .catch(() => {});
           throw err;
         }
       }
 
-      // If already resolved, return the cached result immediately
+      // 3. Competing caller path: if existing execution was resolved, return result
       if (existingRecord?.status === "resolved") {
         return existingRecord.result as T;
       }
 
-      // If rejected earlier, throw the error
-      if (existingRecord?.status === "rejected") {
-        throw new KvdbIdempotencyError(
-          `Idempotent execution for key "${key}" previously failed: ${existingRecord.error}`,
-        );
+      // 4. Poll until the active execution resolves, fails, or times out
+      while (Date.now() - startTime < timeoutMs) {
+        const nextSleep = Math.min(retryIntervalMs, timeoutMs - (Date.now() - startTime));
+        if (nextSleep > 0) {
+          await new Promise((resolve) => setTimeout(resolve, nextSleep));
+        }
+
+        const pollRec = await this.table.get(key);
+        if (pollRec?.status === "resolved") {
+          return pollRec.result as T;
+        }
+        if (!pollRec || pollRec.status === "rejected") {
+          // The previous attempt failed or expired; break out to the outer loop to reclaim
+          break;
+        }
       }
 
-      // If still pending, wait and poll
       const elapsed = Date.now() - startTime;
       if (elapsed >= timeoutMs) {
         throw new KvdbIdempotencyError(
           `Idempotent execution for key "${key}" timed out waiting for concurrent process to finish (${timeoutMs}ms)`,
         );
-      }
-
-      const nextSleep = Math.min(retryIntervalMs, timeoutMs - elapsed);
-      if (nextSleep > 0) {
-        await new Promise((resolve) => setTimeout(resolve, nextSleep));
       }
     }
   }
