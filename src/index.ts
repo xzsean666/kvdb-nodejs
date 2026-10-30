@@ -178,5 +178,30 @@ export type { ScheduledJob, ScheduleOptions, CronOrInterval } from "./schedule/t
 export { createKeyvAdapter } from "./adapters/keyv.js";
 export type { KeyvStoreAdapter } from "./adapters/keyv.js";
 
+// Pub/Sub & Key Watching (docs/SPEC.md §24)
+export { PubSubManager } from "./pubsub/pubsub.js";
+export type {
+  PubSubMessage,
+  Subscription,
+  PubSubOptions,
+  MessageHandler,
+  TableWatchEvent,
+} from "./pubsub/types.js";
+
+// Chunked Blob Storage (docs/SPEC.md §25)
+export { BlobStorage } from "./blob/blob.js";
+export type { BlobMeta, BlobOptions } from "./blob/types.js";
+
+// Observability & Metrics (docs/SPEC.md §26)
+export { MetricsCollector } from "./metrics/metrics.js";
+export type {
+  DatabaseMetrics,
+  LatencyPercentiles,
+  MetricEvent,
+  MetricEventType,
+  MetricHook,
+} from "./metrics/types.js";
+
+
 
 

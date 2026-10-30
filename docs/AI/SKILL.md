@@ -1,6 +1,6 @@
 ---
 name: kvdb-sdk
-description: "面向 Node.js 的高性能、多驱动、可扩展 KV 数据库 SDK (SQLite, PostgreSQL, MongoDB, Redis, MySQL)。支持统一 KV 接口、物理动态多键 (Multi-Key) 二级索引与极速点查、JSON 复杂查询、多级缓存、可靠任务队列、分布式锁、滑动窗口限流、原子数值增减、幂等守护与分布式 Cron 调度。"
+description: "面向 Node.js 的高性能、多驱动、可扩展 KV 数据库 SDK (SQLite, PostgreSQL, MongoDB, Redis, MySQL)。支持统一 KV 接口、物理动态多键 (Multi-Key) 二级索引与极速点查、JSON 复杂查询、多级缓存、可靠任务队列、分布式锁、滑动窗口限流、原子数值增减、幂等守护、分布式 Cron 调度、逻辑软删除与恢复、跨实例 Pub/Sub 与 Key 监听、大对象分块存取及运行时链路可观测指标。"
 ---
 
 # kvdb-sdk AI Skill & Integration Guide
@@ -11,7 +11,7 @@ description: "面向 Node.js 的高性能、多驱动、可扩展 KV 数据库 S
 
 ## 1. 模块定位与核心能力
 
-- **模块定位**：面向 Node.js (>=22/24/26) 的企业级、高性能、多后端、可扩展 KV Database SDK。提供统一的 KV 访问门面、原生物理多键（Multi-Key）二级索引、JSON 语法查询引擎、独立分层缓存（Cache）、原子更新（`update`）、批量写聚合缓冲引擎（`WriteBatcher`）、基于持久化表的可靠任务队列（`Queue`）、分布式互斥锁（`withLock`）、滑动窗口限流器（`RateLimiter`）、原子数值增减（`increment`）、接口幂等守护器（`idempotent`）以及标准生态适配（`Keyv`）。
+- **模块定位**：面向 Node.js (>=22/24/26) 的企业级、高性能、多后端、可扩展 KV Database SDK。提供统一的 KV 访问门面、原生物理多键（Multi-Key）二级索引、JSON 语法查询引擎、独立分层缓存（Cache）、原子更新（`update`）、批量写聚合缓冲引擎（`WriteBatcher`）、基于持久化表的可靠任务队列（`Queue`）、分布式互斥锁（`withLock`）、滑动窗口限流器（`RateLimiter`）、原子数值增减（`increment`）、接口幂等守护器（`idempotent`）、标准生态适配（`Keyv`）、逻辑软删除与恢复（`restore`）、跨实例 Pub/Sub 与 Key 变更监听（`table.watch`）、大对象分块存取（`BlobStorage`）以及链路指标可观测性（`getMetrics`）。
 - **源码根路径**：`/ssd0/git/kvdb-nodejs`
 - **托管账号**：`xzsean666`
 - **Git 远程仓库**：`https://github.com/xzsean666/kvdb-nodejs.git`
@@ -29,6 +29,10 @@ description: "面向 Node.js 的高性能、多驱动、可扩展 KV 数据库 S
   - **动态多键（Multi-Key）物理索引**：突破传统 KV 仅支持主键点查的限制，将高频检索字段直接映射为物理列或顶层字段，挂载底层 B-Tree 物理索引，实现 O(1) 极速点查与高性能范围过滤。
   - **分布式互斥锁与限流器**：内置基于行锁/CAS/Redis的跨实例分布式锁（`db.withLock` / `db.acquireLock`）与滑动窗口限流器（`db.rateLimiter`），支持长任务心跳自动续期。
   - **接口幂等守护与分布式 Cron**：提供 `db.idempotent()` 状态机防止支付与 Webhook 重复处理；扩展 `queue.schedule()` 支持标准 5 段 Cron 跨集群多节点 Exactly-Once 执行。
+  - **逻辑软删除与数据恢复 (Soft Delete & Restore)**：开箱支持 `softDelete: true`，删除操作自动打标，查询默认自动剔除，支持随时 `restore` 恢复与 `hardDelete` 物理抹除。
+  - **变更监听与跨进程事件广播 (Pub/Sub & Key Watching)**：提供 `table.watch("key", handler)` 监听行级读写删变动，支持跨微服务节点广播与进程内极速分发。
+  - **大对象分块流式存取 (Chunked Blob Storage)**：提供 `putBlob` / `getBlob`，自动将超大图片、二进制文件、大型 JSON 按 256KB 自动切片存储，规避 Mongo 16MB 或 MySQL packet 尺寸限制。
+  - **链路指标与运行时可观测性 (Metrics & Observability)**：内置 `db.getMetrics()` 与实时事件 Hook，开箱提供读写吞吐、缓存命中率（Hit/Miss Ratio）、P95/P99 延迟分位数统计。
   - **微批聚合写入（Auto-Batch Coalescing）**：内置 `WriteBatcher`，将高频离散 `set`/`delete` 自动汇聚为参数化 Multi-Row 单条 SQL，并按主键字典序排序，彻底杜绝 PostgreSQL 交叉行锁死锁。
   - **严格并发安全性**：提供悲观锁/乐观锁保障的原子读-改-写（`table.update` / `table.updateRecord`）与原生数值增减（`table.increment` / `table.decrement`）。
   - **多级独立缓存与装饰器**：集成内存 LRU + Redis 外部缓存，防击穿（SingleFlight）、防雪崩（Jitter TTL）、SWR（Stale-While-Revalidate）与 `@Cacheable` 装饰器。
@@ -57,6 +61,9 @@ import {
   createKeyvAdapter,    // Keyv / Unstorage 标准适配器工厂
   parseCronExpression,  // 标准 5 段 Cron 表达式解析器
   getNextCronTime,      // 下次 Cron 触发时间计算器
+  PubSubManager,        // 跨进程/跨实例 Pub/Sub 事件管理器
+  BlobStorage,          // 大对象分块存取管理器 (256KB Chunks)
+  MetricsCollector,     // 运行时链路指标与延迟分析器
   KvdbError,            // 核心错误类基类
   KvdbLockError,        // 分布式锁异常
   KvdbRateLimitError,   // 限流阻断异常
@@ -86,6 +93,9 @@ await db.withLock(key, async (lock) => { ... }, options?: LockOptions);
 const lock = await db.acquireLock(key, options?: LockOptions);
 const limiter = db.rateLimiter(options: RateLimiterOptions);
 await db.idempotent(key, async () => { ... }, options?: IdempotentOptions);
+const ps = db.pubsub(options?: PubSubOptions);
+const metrics = db.getMetrics();
+db.resetMetrics();
 ```
 
 ### 2.3 `Table` 核心操作方法
@@ -101,23 +111,33 @@ interface Table<Value = any, Columns extends Record<string, unknown> = Record<st
   decrement(key: string | number, amount?: number, options?: { path?: string; ttlMs?: number; default?: number }): Promise<number>;
 
   // --- 读取与点查 ---
-  get(key: string | number): Promise<Value | undefined>;
+  get(key: string | number, options?: { includeDeleted?: boolean }): Promise<Value | undefined>;
   getRecord(key: string | number): Promise<PhysicalRecord<Columns, Value> | undefined>;
   getBy(keyName: keyof Columns | string, keyValue: unknown): Promise<PhysicalRecord<Columns, Value> | undefined>; // 【核心】O(1) 物理二级键点查
   getMany(keys: (string | number)[]): Promise<(Value | undefined)[]>;
   getByPrefix(prefix: string): Promise<Array<{ key: string; value: Value }>>;
   exists(key: string | number): Promise<boolean>;
-  count(query?: { where?: Record<string, unknown>; columns?: Record<string, unknown> }): Promise<number>;
+  count(query?: FindQuery): Promise<number>;
 
-  // --- 删除与清理 ---
-  delete(key: string | number): Promise<boolean>;
+  // --- 删除、软删除与恢复 ---
+  delete(key: string | number, options?: { hard?: boolean }): Promise<boolean>;
+  hardDelete(key: string | number): Promise<boolean>;
+  restore(key: string | number): Promise<boolean>;
+  isDeleted(key: string | number): Promise<boolean>;
   deleteMany(keys: (string | number)[]): Promise<number>;
   deleteByPrefix(prefix: string): Promise<number>;
   clear(): Promise<void>;
 
-  // --- 丰富条件查询 ---
+  // --- 条件检索与事件监听 ---
   find(query?: FindQuery): Promise<Array<{ key: string; value: Value }>>;
   findRecords(query?: FindQuery): Promise<Array<PhysicalRecord<Columns, Value>>>;
+  watch(key: string, handler: (event: TableWatchEvent<Value>) => void): Promise<Subscription>;
+
+  // --- 大对象分块存取 (Chunked Blobs) ---
+  putBlob(key: string, data: Buffer | Uint8Array | string, options?: BlobOptions): Promise<BlobMeta>;
+  getBlob(key: string): Promise<Buffer | undefined>;
+  getBlobMeta(key: string): Promise<BlobMeta | undefined>;
+  deleteBlob(key: string): Promise<boolean>;
 
   // --- 物理索引、Schema 演进与生态适配 ---
   ensureIndex(jsonPath: string): Promise<void>;                   // 普通 KV 表 JSON 路径建索引
@@ -581,6 +601,123 @@ const keyvStore = table.asKeyv();
 // 符合 Keyv Storage Adapter 标准规范: get, set, delete, clear, has, iterator
 await keyvStore.set("session_101", { user: "Alice" }, 3600_000);
 const session = await keyvStore.get("session_101");
+```
+
+### 7.7 逻辑软删除与数据恢复 (Soft Delete & Restore)
+在很多生产业务中，误删防范、历史审计与逻辑标记删除是刚需。通过在表初始化时开启 `softDelete: true`，即可在所有底层数据库（SQLite / PG / Mongo / MySQL / Redis）上实现标准软删除：
+```typescript
+const users = db.table<{ id: string; name: string }>("users", {
+  softDelete: true, // 开启逻辑软删除支持
+});
+
+await users.set("u1", { id: "u1", name: "Alice" });
+
+// 1. 逻辑软删除 (自动标记 _deletedAt 时间戳)
+await users.delete("u1");
+
+// 2. 常规读取与查询自动过滤已删除项
+const user = await users.get("u1");          // undefined
+const exists = await users.exists("u1");      // false
+const list = await users.find();             // []
+const count = await users.count();           // 0
+
+// 3. 状态检查与带软删除穿透查询
+const isDel = await users.isDeleted("u1");   // true
+const raw = await users.get("u1", { includeDeleted: true }); // { id: "u1", name: "Alice", _deletedAt: 1730000000000 }
+const all = await users.find({ includeDeleted: true });       // 包含已删除记录
+
+// 4. 数据一键恢复
+await users.restore("u1");
+const restored = await users.get("u1");      // { id: "u1", name: "Alice" }
+
+// 5. 物理彻底抹除 (Bypassing soft delete)
+await users.hardDelete("u1");
+```
+
+### 7.8 跨进程变更监听与事件广播 (Pub/Sub & Key Watching)
+提供轻量高效的微服务节点通信与数据变动实时监听：
+```typescript
+// 1. 数据表行级变动监听 (Table Watch)
+const orders = db.table("orders");
+
+// 监听特定 Key 的变更（set 或 delete）
+const subKey = await orders.watch("order:1001", (evt) => {
+  console.log(`Order updated: key=${evt.key}, type=${evt.type}, value=`, evt.value);
+});
+
+// 监听全表任何 Key 的变动
+const subAll = await orders.watch("*", (evt) => {
+  console.log(`Global table change: ${evt.type} on ${evt.key}`);
+});
+
+await orders.set("order:1001", { status: "shipped" }); // 触发上述监听
+await subKey.unsubscribe();
+
+// 2. 跨微服务/跨实例 Pub/Sub 事件总线
+const ps = db.pubsub();
+
+const subAlerts = await ps.subscribe("system:alerts", (payload, msg) => {
+  console.log(`Received alert: ${payload} at ${msg.timestamp}`);
+});
+
+// 支持进程内毫秒级极速分发 + 跨实例持久化事件轮询
+await ps.publish("system:alerts", { level: "warning", message: "CPU > 85%" });
+await subAlerts.unsubscribe();
+```
+
+### 7.9 大对象分块流式存取 (Chunked Blob Storage)
+MongoDB 单文档限制 16MB、MySQL 单包大小受制于 `max_allowed_packet`、SQLite 大字段影响 B-Tree 叶子节点性能。通过 `putBlob` / `getBlob` 将超大文件、高分辨率图片或超大 JSON 自动切片存储：
+```typescript
+const assets = db.table("assets");
+
+// 1. 自动分块写入 (默认 256KB/Chunk，可自定义)
+const largeBuffer = fs.readFileSync("./report.pdf");
+const meta = await assets.putBlob("reports/2026-q1.pdf", largeBuffer, {
+  chunkSize: 256 * 1024,                  // 256KB
+  contentType: "application/pdf",
+  ttlMs: 7 * 86400_000,                  // 支持为大对象设置过期 TTL
+});
+// meta: { key: "reports/2026-q1.pdf", size: 1048576, chunkSize: 262144, totalChunks: 4, createdAt: ... }
+
+// 2. 极速元数据读取 (无需加载整包二进制)
+const blobMeta = await assets.getBlobMeta("reports/2026-q1.pdf");
+
+// 3. 读取并自动重组为完整 Buffer
+const fileBuffer = await assets.getBlob("reports/2026-q1.pdf"); // Buffer
+
+// 4. 一键完整清理所有分块及元数据
+await assets.deleteBlob("reports/2026-q1.pdf");
+```
+
+### 7.10 运行时链路指标与延迟分析 (Observability & Metrics)
+无需安装庞大第三方 APM 插件，开箱即用获取核心健康度与操作性能指标，轻松对接 Prometheus 或 Grafana：
+```typescript
+// 1. 获取全局运行指标快照
+const metrics = db.getMetrics();
+console.log({
+  reads: metrics.reads,                     // 总读取次数
+  writes: metrics.writes,                   // 总写入次数
+  deletes: metrics.deletes,                 // 总删除次数
+  cacheHits: metrics.cacheHits,             // 缓存命中次数
+  cacheMisses: metrics.cacheMisses,         // 缓存未命中次数
+  cacheHitRatio: metrics.cacheHitRatio,     // 命中率 (0.0000 ~ 1.0000)
+  uptimeSeconds: metrics.uptimeSeconds,     // 运行秒数
+  latency: {
+    avgMs: metrics.latency.avgMs,           // 平均延迟毫秒
+    p95Ms: metrics.latency.p95Ms,           // P95 延迟分位数
+    p99Ms: metrics.latency.p99Ms,           // P99 延迟分位数
+    maxMs: metrics.latency.maxMs,           // 最大耗时
+  },
+});
+
+// 2. 实时链路性能钩子 (可向 OpenTelemetry / StatsD 投递)
+const unhook = db.metrics.onMetric((evt) => {
+  // evt: { type: "read"|"write"|"delete"|"lock", durationMs: 0.8, success: true, key: "user:10" }
+  otelHistogram.record(evt.durationMs, { type: evt.type });
+});
+
+// 3. 指标重置 (例如定时 1 分钟周期清零重新采样)
+db.resetMetrics();
 ```
 
 ---

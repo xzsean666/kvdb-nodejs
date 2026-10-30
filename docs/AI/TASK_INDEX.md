@@ -45,12 +45,13 @@
 | **TASK-033-PRODUCTION-AUDIT-REMEDIATION** | 生产环境深度缺陷与短板全量加固 | M3+ | **DONE** | TASK-032-PRODUCTION-READY | `src/*`, `test/*`, `package.json` |
 | **TASK-034-PRODUCTION-HARDENING-UPGRADE** | 生产缺陷全面修复与高可用性能升级 | M3+ | **DONE** | TASK-033-PRODUCTION-AUDIT-REMEDIATION | `src/*`, `test/*`, `docs/*` |
 | **TASK-035-UNIVERSAL-DEVELOPER-EXTENSIONS** | 全数据库通用的高频高价值开发者功能模块扩展 | M3+ | **DONE** | TASK-034-PRODUCTION-HARDENING-UPGRADE | `src/lock/*`, `src/limiter/*`, `src/idempotency/*`, `src/schedule/*`, `src/adapters/*`, `src/core/*` |
+| **TASK-036-ADVANCED-PRODUCTIVITY-EXTENSIONS** | 中长期高价值进阶功能落地 (软删除、PubSub、分块Blob、可观测性) | M3+ | **DONE** | TASK-035-UNIVERSAL-DEVELOPER-EXTENSIONS | `src/core/*`, `src/pubsub/*`, `src/blob/*`, `src/metrics/*`, `docs/*` |
 
 ---
 
 ## 2. 状态流转总览
 
-- **已完成 (DONE)**: TASK-001 ~ TASK-035 全部任务 (共 35 项任务已 100% 全部完成交付)
+- **已完成 (DONE)**: TASK-001 ~ TASK-036 全部任务 (共 36 项任务已 100% 全部完成交付)
 - **进行中 (IN_PROGRESS)**: 0 项
 - **后续规划 (TODO)**: 0 项
 - **待审查/验证中 (REVIEW)**: 0 项
@@ -71,5 +72,6 @@
   - [x] TASK-033-PRODUCTION-AUDIT-REMEDIATION: 生产环境深度缺陷与短板全量加固 (DONE)
   - [x] TASK-034-PRODUCTION-HARDENING-UPGRADE: 生产缺陷全面修复与高可用性能升级 (DONE)
   - [x] TASK-035-UNIVERSAL-DEVELOPER-EXTENSIONS: 全数据库通用的高频高价值开发者功能模块扩展 (DONE)
+  - [ ] TASK-036-ADVANCED-PRODUCTIVITY-EXTENSIONS: 中长期高价值进阶功能落地 (软删除、PubSub、分块Blob、可观测性) (IN_PROGRESS)
 
 

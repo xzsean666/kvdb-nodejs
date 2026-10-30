@@ -611,5 +611,105 @@ const store = table.asKeyv();
 // 符合 Keyv Storage Adapter 标准规范 (get, set, delete, clear, has)
 ```
 
+---
+
+## 23. 软删除与数据恢复 (Soft Delete & Restore)
+
+配置 `softDelete: true` 时，删除操作标记 `_deletedAt` 逻辑删除，而不是物理移除数据：
+
+```ts
+const users = db.table("users", { softDelete: true });
+
+// 软删除
+await users.delete("u1");
+
+// 正常查询自动过滤已删除记录
+await users.get("u1"); // undefined
+await users.find();    // 不包含 u1
+
+// 显式包含已删除记录
+await users.get("u1", { includeDeleted: true }); // 返回数据
+await users.find({ includeDeleted: true });
+
+// 恢复误删数据
+await users.restore("u1");
+
+// 永久物理删除
+await users.hardDelete("u1");
+```
+
+---
+
+## 24. 变更监听与事件广播 (Pub/Sub & Table Watch)
+
+支持跨实例、跨进程事件广播，支持对单个 Key 的实时变更监听：
+
+```ts
+const pubsub = db.pubsub();
+
+// 订阅频道
+const sub = await pubsub.subscribe("chat:room_1", (msg) => {
+  console.log("Received:", msg);
+});
+
+// 发布事件
+await pubsub.publish("chat:room_1", { text: "Hello world", at: Date.now() });
+
+// 监听数据表特定 Key 变更
+const watcher = table.watch("config:feature_flags", (change) => {
+  console.log("Config changed:", change.type, change.value);
+});
+
+await sub.unsubscribe();
+await watcher.unsubscribe();
+```
+
+---
+
+## 25. 大对象分块存取 (Chunked Blob Storage)
+
+突破单文档大小限制（MongoDB 16MB、MySQL max_allowed_packet、Redis/SQLite 大单键），自动按 256KB 切片并维护元数据清单：
+
+```ts
+// 写入大对象（Buffer、Uint8Array 或字符串）
+const meta = await table.putBlob("report.pdf", pdfBuffer, {
+  chunkSize: 256 * 1024,
+  contentType: "application/pdf",
+});
+
+// 读取完整 Buffer
+const buffer = await table.getBlob("report.pdf");
+
+// 获取元数据清单
+const meta = await table.getBlobMeta("report.pdf");
+// { size: 1048576, totalChunks: 4, chunkSize: 262144, contentType: "application/pdf" }
+
+// 删除大对象（自动清除元数据与所有分块）
+await table.deleteBlob("report.pdf");
+```
+
+---
+
+## 26. 内置可观测性与链路指标 (Observability & Metrics)
+
+原生零依赖统计读写吞吐、慢查询、P95/P99 延时分位数、缓存命中率：
+
+```ts
+const metrics = db.getMetrics();
+// {
+//   reads: 1250,
+//   writes: 480,
+//   deletes: 12,
+//   cache: { hits: 850, misses: 400, hitRatio: 0.68 },
+//   latency: { avgMs: 1.2, p95Ms: 4.8, maxMs: 18.2 },
+//   locks: { active: 1, acquired: 35, timeouts: 0 },
+//   queue: { pushed: 50, completed: 48, failed: 2 }
+// }
+
+// 重置指标
+db.resetMetrics();
+```
+
+
 
 

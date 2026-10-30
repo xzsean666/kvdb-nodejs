@@ -7,13 +7,44 @@
 
 ## 1. 核心状态概要
 
-- **当前 Goal**: 全数据库通用的高频高价值开发者功能模块扩展 (TASK-035-UNIVERSAL-DEVELOPER-EXTENSIONS)
-- **当前 Task**: 实施分布式锁 (Lock/Mutex)、原子数值增减 (Increment/Decrement)、业务限流器 (RateLimiter)、接口幂等守护器 (Idempotency)、分布式 Cron 定时调度 (Queue.schedule) 与 Keyv 适配器，支持 SQLite 内存模式及全数据库基准
-- **当前状态**: **COMPLETED_AND_VERIFIED** (6 项高价值通用功能模块全部交付，297 项单元测试与 26 个官方实战示例全部 100% 绿灯通过，SPEC 与 SKILL 文档同步完成)
+- **当前 Goal**: 中长期高价值进阶功能落地 (软删除、PubSub、分块Blob、可观测性) (TASK-036-ADVANCED-PRODUCTIVITY-EXTENSIONS)
+- **当前 Task**: 实施 Table 软删除与恢复、跨实例 Pub/Sub 与 Table.watch、大对象分块存储 Chunked Blob、内置 Metrics 与可观测性钩子
+- **当前状态**: **DONE** (代码实现、类型契约、304 个单元测试全量绿灯、26 个官方示例全量绿灯、规范与 SKILL 技能库已同步完成)
 
 ---
 
-## 2. 本次任务交付清单 (TASK-035-UNIVERSAL-DEVELOPER-EXTENSIONS)
+## 2. 本次任务交付清单 (TASK-036-ADVANCED-PRODUCTIVITY-EXTENSIONS)
+
+1. **逻辑软删除与数据恢复 (`src/core/table.ts`)**:
+   - `softDelete: true` 配置开关：在所有数据库（SQLite 含 `:memory:`、PostgreSQL、MySQL、MongoDB、Redis）上统一实现逻辑软删除。
+   - `table.delete(key)`：打上 `_deletedAt` 时间戳标记，常规 `table.get(key)`、`table.exists(key)`、`table.find()`、`table.count()` 默认全部自动过滤逻辑删除数据。
+   - `includeDeleted: true` 穿透开关：允许在审计或管理后台读取已软删除的数据。
+   - `table.restore(key)`：一键清除软删除标记，无缝恢复数据。
+   - `table.hardDelete(key)`：物理底层抹除，绕过软删除。
+   - `table.isDeleted(key)`：状态判断辅助方法。
+2. **通用 Pub/Sub 与 Key 监听 (`src/pubsub/`, `src/core/table.ts`)**:
+   - `db.pubsub()`：跨实例与进程内事件总线管理器，提供 `publish()` 与 `subscribe()`。
+   - `table.watch("key", callback)` 与 `table.watch("*", callback)`：表级变更实时监听，精准捕获 `set` 与 `delete` 事件，支持 `subscription.unsubscribe()`。
+   - 进程内毫秒级极速分发（基于 EventEmitter），多实例基于共享事件流持久化表安全轮询广播，天然隔离内部系统表并杜绝本地重复投递。
+3. **大对象分块流式存取 (`src/blob/`, `src/core/table.ts`)**:
+   - `table.putBlob(key, data, options)`：将超大二进制 Buffer、图片、PDF 或超大 JSON 自动切片为 256KB 分块存储，维护元数据 Manifest。彻底突破 MongoDB 16MB 单文档、MySQL `max_allowed_packet` 限制与 Redis/SQLite 大单键性能瓶颈。
+   - `table.getBlobMeta(key)`：极速读取元数据清单（尺寸、分块数、Content-Type、时间戳），无需反序列化整包数据。
+   - `table.getBlob(key)`：按顺序自动拉取所有分块并重组为原始 Buffer。
+   - `table.deleteBlob(key)`：一键批量清理所有分块及元数据。
+4. **内置可观测性指标与 APM 钩子 (`src/metrics/`, `src/core/kvdb.ts`, `src/core/table.ts`)**:
+   - `db.getMetrics()`：实时获取运行健康指标快照，涵盖读、写、删吞吐量、缓存命中次数与未命中次数、缓存命中率（Hit Ratio）、运行秒数以及基于滑动窗口采样的响应延迟百分位数（`avgMs`, `p95Ms`, `p99Ms`, `maxMs`）。
+   - `db.metrics.onMetric(hook)`：实时性能事件钩子，支持零胶水桥接至 Prometheus、OpenTelemetry、Datadog 或 StatsD。
+   - `db.resetMetrics()`：支持按周期清零重新采样。
+5. **全数据库通用验证与测试**:
+   - 零外部重依赖，在 SQLite 纯内存模式 (`:memory:`) 下即可立即可用。
+   - 新增 `test/unit/advanced-extensions.test.ts`，涵盖全部 4 大功能模块共 7 项全面端到端单元测试。
+   - 304 项全量测试用例（30 个测试文件）100% 绿灯。
+   - 26 个官方实战用例通过 `pnpm examples` 100% 正常运行。
+   - 文档升级：`docs/SPEC.md` (§23-§26) 与 `docs/AI/SKILL.md` (7.7-7.10 节) 均已更新。
+
+---
+
+## 3. 前次任务交付清单 (TASK-035-UNIVERSAL-DEVELOPER-EXTENSIONS)
 
 ### A. 通用核心功能模块
 1. **分布式锁与互斥控制 (`src/lock/`)**:

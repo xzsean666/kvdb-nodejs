@@ -41,6 +41,10 @@ import { RateLimiter } from "../limiter/rate-limiter.js";
 import type { RateLimiterOptions } from "../limiter/types.js";
 import { IdempotencyManager } from "../idempotency/idempotent.js";
 import type { IdempotentOptions } from "../idempotency/types.js";
+import { PubSubManager } from "../pubsub/pubsub.js";
+import type { PubSubOptions } from "../pubsub/types.js";
+import { MetricsCollector } from "../metrics/metrics.js";
+import type { DatabaseMetrics, MetricHook } from "../metrics/types.js";
 
 
 /** Driver names accepted in config (mirrors docs/SPEC.md and the README). */
@@ -98,6 +102,10 @@ export interface TableOptions<Columns extends Record<string, unknown> = Record<s
   autoBatch?: boolean | AutoBatchOptions;
   /** Query result caching configuration. */
   queryCache?: boolean | import("./table.js").QueryCacheOptions;
+  /** Enable logical soft delete. Default: false. */
+  softDelete?: boolean;
+  /** Internal SDK table flag (skips user hooks). */
+  internal?: boolean;
 }
 
 export interface AlterTableOptions {
@@ -117,6 +125,8 @@ export class KVDB {
   private readonly queueCache = new Map<string, Queue<any, any>>();
   private lockManager?: LockManager;
   private idempotencyManager?: IdempotencyManager;
+  private pubsubManager?: PubSubManager;
+  readonly metrics = new MetricsCollector();
   private readonly activeWorkers = new Set<Worker<any, any>>();
   private driverPromise: Promise<Driver> | undefined;
   private cleanupTimer: ReturnType<typeof setInterval> | undefined;
@@ -178,16 +188,21 @@ export class KVDB {
     const cache = options.cache ? toCache(options.cache) : this.cache;
     const autoBatch = resolveAutoBatchOptions(options.autoBatch, this.autoBatch);
     const effectiveSchemaName = this.tablePrefix ? `${this.tablePrefix}${namespace}` : namespace;
+    const isInternal = Boolean(options.internal) || namespace.startsWith("_kvdb_") || namespace.startsWith("__kvdb_");
+    const hooks = isInternal ? new HookRuntime() : this.hooks;
     const tbl = new Table<Value, Columns>({
       getDriver: () => this.getDriver(),
       scope: { tablePrefix: this.tablePrefix, namespace },
       cache,
-      hooks: this.hooks,
-      autoIndex: this.autoIndex,
+      hooks,
+      autoIndex: isInternal ? undefined : this.autoIndex,
       schemaName: effectiveSchemaName,
       schema: options.schema,
       autoBatch,
       queryCache: options.queryCache,
+      softDelete: options.softDelete,
+      getPubSub: (createIfMissing = false) => (createIfMissing ? this.pubsub() : this.pubsubManager),
+      metrics: this.metrics,
     });
     this.tableCache.set(namespace, tbl);
     return tbl;
@@ -282,6 +297,30 @@ export class KVDB {
     return this.idempotencyManager.idempotent(key, fn, options);
   }
 
+  /**
+   * Cross-instance Pub/Sub messaging and table event broadcast manager.
+   */
+  pubsub(options?: PubSubOptions): PubSubManager {
+    if (!this.pubsubManager) {
+      this.pubsubManager = new PubSubManager(this, options);
+    }
+    return this.pubsubManager;
+  }
+
+  /**
+   * Current snapshot of operational metrics (reads, writes, deletes, cache hit ratio, latency).
+   */
+  getMetrics(): DatabaseMetrics {
+    return this.metrics.getMetrics();
+  }
+
+  /**
+   * Reset operational metrics counters and latency percentiles.
+   */
+  resetMetrics(): void {
+    this.metrics.reset();
+  }
+
   /** Delete a physical schema table and its registry metadata. */
   async dropTable(name: string): Promise<boolean> {
     const table = this.tableCache.get(name);
@@ -353,6 +392,12 @@ export class KVDB {
     // Close instance-level shared cache
     if (this.cache) {
       await this.cache.close().catch(() => {});
+    }
+
+    // Close PubSub manager if active
+    if (this.pubsubManager) {
+      await this.pubsubManager.close().catch(() => {});
+      this.pubsubManager = undefined;
     }
 
     if (this.driverPromise !== undefined) {

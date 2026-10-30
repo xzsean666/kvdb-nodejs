@@ -34,6 +34,11 @@ import { WriteBatcher, resolveAutoBatchOptions } from "./batcher.js";
 import type { AutoBatchOptions, BatchFlushPayload, BatchFlushResult } from "./batcher.js";
 import { createKeyvAdapter } from "../adapters/keyv.js";
 import type { KeyvStoreAdapter } from "../adapters/keyv.js";
+import { BlobStorage } from "../blob/blob.js";
+import type { BlobMeta, BlobOptions } from "../blob/types.js";
+import type { PubSubManager } from "../pubsub/pubsub.js";
+import type { Subscription, TableWatchEvent } from "../pubsub/types.js";
+import type { MetricsCollector } from "../metrics/metrics.js";
 
 
 /** User-facing query document for `find` (parsed into the AST internally). */
@@ -44,6 +49,8 @@ export interface FindQuery {
   limit?: number;
   offset?: number;
   sort?: { path: string; direction?: "asc" | "desc" }[];
+  /** Include logically soft-deleted records. Default: false. */
+  includeDeleted?: boolean;
 }
 
 export interface SetOptions<Columns = Record<string, unknown>> {
@@ -92,6 +99,12 @@ export interface TableDependencies {
   autoBatch?: boolean | AutoBatchOptions;
   /** Query result caching configuration. */
   queryCache?: boolean | QueryCacheOptions;
+  /** Enable logical soft delete. Default: false. */
+  softDelete?: boolean;
+  /** Provider for PubSubManager instance. */
+  getPubSub?: (createIfMissing?: boolean) => PubSubManager | undefined;
+  /** Operational metrics collector. */
+  metrics?: MetricsCollector;
 }
 
 export class Table<Value = JsonValue, Columns extends Record<string, unknown> = Record<string, unknown>> {
@@ -142,6 +155,28 @@ export class Table<Value = JsonValue, Columns extends Record<string, unknown> = 
   /** The physical schema associated with this table, if any. */
   get schema(): TableSchema | MultiKeySchema | undefined {
     return this.deps.schema;
+  }
+
+  /** Whether logical soft delete is enabled for this table. */
+  get softDeleteEnabled(): boolean {
+    return Boolean(this.deps.softDelete);
+  }
+
+  private notifyWatch(key: string, value: Value | undefined, type: "set" | "delete"): void {
+    if (this.namespace.startsWith("_kvdb_") || this.namespace.startsWith("__kvdb_")) {
+      return;
+    }
+    const ps = this.deps.getPubSub?.(false);
+    if (ps) {
+      const evt: TableWatchEvent<Value> = {
+        key,
+        value,
+        type,
+        timestamp: Date.now(),
+      };
+      ps.publish(`_watch:${this.namespace}:${key}`, evt).catch(() => {});
+      ps.publish(`_watch:${this.namespace}:*`, evt).catch(() => {});
+    }
   }
 
   private async flushBatch(payload: BatchFlushPayload<Value>): Promise<BatchFlushResult | void> {
@@ -397,6 +432,7 @@ export class Table<Value = JsonValue, Columns extends Record<string, unknown> = 
   }
 
   async set(key: string | number, value: Value, options: SetOptions<Columns> = {}): Promise<void> {
+    const start = Date.now();
     // KD-7: storing undefined is a deletion.
     if (value === undefined) {
       await this.delete(key);
@@ -419,12 +455,15 @@ export class Table<Value = JsonValue, Columns extends Record<string, unknown> = 
 
     if (this.writeBatcher) {
       const rawKeys = (options.keys ?? options.columns) as Record<string, unknown> | undefined;
-      return this.writeBatcher.enqueue({
+      await this.writeBatcher.enqueue({
         key,
         value: before.value as Value,
         keys: rawKeys,
         ttlMs: before.ttlMs,
       });
+      this.notifyWatch(strKey, before.value as Value, "set");
+      this.deps.metrics?.recordWrite(Date.now() - start, true, strKey);
+      return;
     }
 
     const schema = await this.schemaDriver();
@@ -438,6 +477,8 @@ export class Table<Value = JsonValue, Columns extends Record<string, unknown> = 
         await this.deps.hooks.run("afterWrite", before);
       }
       await this.invalidateQueryCache();
+      this.notifyWatch(strKey, before.value as Value, "set");
+      this.deps.metrics?.recordWrite(Date.now() - start, true, strKey);
       return;
     }
 
@@ -448,6 +489,8 @@ export class Table<Value = JsonValue, Columns extends Record<string, unknown> = 
       await this.deps.hooks.run("afterWrite", before);
     }
     await this.invalidateQueryCache();
+    this.notifyWatch(strKey, before.value as Value, "set");
+    this.deps.metrics?.recordWrite(Date.now() - start, true, strKey);
   }
 
   /**
@@ -721,7 +764,11 @@ export class Table<Value = JsonValue, Columns extends Record<string, unknown> = 
     return { value: finalValue, columns: finalColumns };
   }
 
-  async get(key: string | number): Promise<Value | undefined> {
+  async get(
+    key: string | number,
+    options: { includeDeleted?: boolean } = {},
+  ): Promise<Value | undefined> {
+    const start = Date.now();
     const strKey = String(key);
     if (this.deps.hooks.has("beforeRead")) {
       await this.deps.hooks.run("beforeRead", { namespace: this.namespace, key: strKey, value: undefined });
@@ -763,46 +810,79 @@ export class Table<Value = JsonValue, Columns extends Record<string, unknown> = 
       const cKey = this.cacheKey(strKey, Boolean(schema));
       const cached = this.deps.cache ? await this.deps.cache.get<Value>(cKey) : undefined;
       if (cached !== undefined) {
+        this.deps.metrics?.recordCache(true);
         value = cached;
-      } else if (schema) {
-        const record = await schema.getRecord(key);
-        if (record !== undefined) {
-          value = deserialize<Value>(record.value);
-          if (this.deps.cache) {
-            const remainingTtl = ttlFromExpiry(record.expiresAt);
-            await this.deps.cache.set(cKey, value, remainingTtl);
-          }
-        }
       } else {
-        const driver = await this.deps.getDriver();
-        const entry = await driver.get(cKey);
-        if (entry !== undefined) {
-          value = deserialize<Value>(entry.value);
-          if (this.deps.cache) {
-            const remainingTtl = ttlFromExpiry(entry.expiresAt);
-            await this.deps.cache.set(cKey, value, remainingTtl);
+        this.deps.metrics?.recordCache(false);
+        if (schema) {
+          const record = await schema.getRecord(key);
+          if (record !== undefined) {
+            value = deserialize<Value>(record.value);
+            if (this.deps.cache) {
+              const remainingTtl = ttlFromExpiry(record.expiresAt);
+              await this.deps.cache.set(cKey, value, remainingTtl);
+            }
+          }
+        } else {
+          const driver = await this.deps.getDriver();
+          const entry = await driver.get(cKey);
+          if (entry !== undefined) {
+            value = deserialize<Value>(entry.value);
+            if (this.deps.cache) {
+              const remainingTtl = ttlFromExpiry(entry.expiresAt);
+              await this.deps.cache.set(cKey, value, remainingTtl);
+            }
           }
         }
       }
     }
 
+    if (this.softDeleteEnabled && !options.includeDeleted) {
+      if (value !== undefined && typeof value === "object" && value !== null && (value as any)._deletedAt !== undefined) {
+        value = undefined;
+      }
+    }
+
+    let finalValue = value;
     if (this.deps.hooks.has("afterRead")) {
       const after = await this.deps.hooks.run("afterRead", {
         namespace: this.namespace,
         key: strKey,
         value: value as JsonValue | undefined,
       });
-      return after.value as Value | undefined;
+      finalValue = after.value as Value | undefined;
     }
-    return value;
+    this.deps.metrics?.recordRead(Date.now() - start, finalValue !== undefined, strKey);
+    return finalValue;
   }
 
 
-  async delete(key: string | number): Promise<boolean> {
-    if (this.writeBatcher) {
-      return this.writeBatcher.enqueueDelete(key);
-    }
+  async delete(key: string | number, options?: { hard?: boolean }): Promise<boolean> {
+    const start = Date.now();
     const strKey = String(key);
+
+    if (this.softDeleteEnabled && !options?.hard) {
+      const existing = await this.get(key);
+      if (existing === undefined) {
+        this.deps.metrics?.recordDelete(Date.now() - start, false, strKey);
+        return false;
+      }
+      const softDeleted = typeof existing === "object" && existing !== null
+        ? { ...(existing as any), _deletedAt: Date.now() }
+        : { _value: existing, _deletedAt: Date.now() };
+
+      await this.set(key, softDeleted as Value);
+      this.notifyWatch(strKey, undefined, "delete");
+      this.deps.metrics?.recordDelete(Date.now() - start, true, strKey);
+      return true;
+    }
+
+    if (this.writeBatcher) {
+      const ok = await this.writeBatcher.enqueueDelete(key);
+      this.notifyWatch(strKey, undefined, "delete");
+      this.deps.metrics?.recordDelete(Date.now() - start, ok, strKey);
+      return ok;
+    }
     const schema = await this.schemaDriver();
     const cKey = this.cacheKey(strKey, Boolean(schema));
     if (this.deps.cache) await this.deps.cache.delete(cKey);
@@ -815,11 +895,51 @@ export class Table<Value = JsonValue, Columns extends Record<string, unknown> = 
     }
     if (ok) {
       await this.invalidateQueryCache();
+      this.notifyWatch(strKey, undefined, "delete");
     }
+    this.deps.metrics?.recordDelete(Date.now() - start, ok, strKey);
     return ok;
   }
 
+  /**
+   * Restore a logically soft-deleted record.
+   */
+  async restore(key: string | number): Promise<boolean> {
+    const existing = await this.get(key, { includeDeleted: true });
+    if (!existing || typeof existing !== "object" || (existing as any)._deletedAt === undefined) {
+      return false;
+    }
+    let restored: Value;
+    if ("_value" in existing && Object.keys(existing).length === 2) {
+      restored = (existing as any)._value;
+    } else {
+      const copy = { ...(existing as any) };
+      delete copy._deletedAt;
+      restored = copy as Value;
+    }
+    await this.set(key, restored);
+    return true;
+  }
+
+  /**
+   * Physically delete a record from the storage driver, bypassing soft delete.
+   */
+  async hardDelete(key: string | number): Promise<boolean> {
+    return this.delete(key, { hard: true });
+  }
+
+  /**
+   * Check whether a record exists and is in soft-deleted state.
+   */
+  async isDeleted(key: string | number): Promise<boolean> {
+    const existing = await this.get(key, { includeDeleted: true });
+    return Boolean(existing && typeof existing === "object" && (existing as any)._deletedAt !== undefined);
+  }
+
   async exists(key: string | number): Promise<boolean> {
+    if (this.softDeleteEnabled) {
+      return (await this.get(key)) !== undefined;
+    }
     if (this.writeBatcher) {
       const pending = this.writeBatcher.getPending(key);
       if (pending) {
@@ -867,6 +987,9 @@ export class Table<Value = JsonValue, Columns extends Record<string, unknown> = 
   }
 
   async getMany(keys: (string | number)[]): Promise<(Value | undefined)[]> {
+    if (this.softDeleteEnabled) {
+      return Promise.all(keys.map((k) => this.get(k)));
+    }
     if (this.writeBatcher && (this.writeBatcher.pendingCount > 0 || this.writeBatcher.isFlushingNow)) {
       await this.writeBatcher.flush();
     }
@@ -1105,6 +1228,12 @@ export class Table<Value = JsonValue, Columns extends Record<string, unknown> = 
       }));
     }
 
+    if (this.softDeleteEnabled && !query.includeDeleted) {
+      result = result.filter(
+        (item) => !(item.value && typeof item.value === "object" && (item.value as any)._deletedAt !== undefined),
+      );
+    }
+
     if (qKey && this.deps.cache) {
       await this.deps.cache.set(qKey, result, this.queryCacheTtlMs);
     }
@@ -1115,6 +1244,9 @@ export class Table<Value = JsonValue, Columns extends Record<string, unknown> = 
    * Count records matching a query filter with native database-level aggregation.
    */
   async count(query: FindQuery = {}): Promise<number> {
+    if (this.softDeleteEnabled && !query.includeDeleted) {
+      return (await this.find(query)).length;
+    }
     if (this.writeBatcher && (this.writeBatcher.pendingCount > 0 || this.writeBatcher.isFlushingNow)) {
       await this.writeBatcher.flush();
     }
@@ -1202,6 +1334,12 @@ export class Table<Value = JsonValue, Columns extends Record<string, unknown> = 
       }));
     }
 
+    if (this.softDeleteEnabled && !query.includeDeleted) {
+      records = records.filter(
+        (rec) => !(rec.value && typeof rec.value === "object" && (rec.value as any)._deletedAt !== undefined),
+      );
+    }
+
     if (qKey && this.deps.cache) {
       await this.deps.cache.set(qKey, records, this.queryCacheTtlMs);
     }
@@ -1218,14 +1356,17 @@ export class Table<Value = JsonValue, Columns extends Record<string, unknown> = 
       return value === undefined ? undefined : { key: key as any, columns: {} as Partial<Columns>, keys: {} as Partial<Columns>, value };
     }
     const record = await schema.getRecord(key);
-    return record
-      ? {
-          key: record.key as any,
-          columns: record.columns as Partial<Columns>,
-          keys: record.columns as Partial<Columns>,
-          value: deserialize<Value>(record.value),
-        }
-      : undefined;
+    if (!record) return undefined;
+    const val = deserialize<Value>(record.value);
+    if (this.softDeleteEnabled && val && typeof val === "object" && (val as any)._deletedAt !== undefined) {
+      return undefined;
+    }
+    return {
+      key: record.key as any,
+      columns: record.columns as Partial<Columns>,
+      keys: record.columns as Partial<Columns>,
+      value: val,
+    };
   }
 
   /**
@@ -1372,6 +1513,55 @@ export class Table<Value = JsonValue, Columns extends Record<string, unknown> = 
    */
   asKeyv(): KeyvStoreAdapter<Value> {
     return createKeyvAdapter(this);
+  }
+
+  /**
+   * Listen to real-time mutations on a specific key or "*" for all keys in this table.
+   */
+  async watch(
+    key: string,
+    handler: (event: TableWatchEvent<Value>) => void | Promise<void>,
+  ): Promise<Subscription> {
+    const ps = this.deps.getPubSub?.(true);
+    if (!ps) {
+      throw new KvdbError("UNSUPPORTED", "PubSub is not enabled on this KVDB instance.");
+    }
+    const channel = key === "*"
+      ? `_watch:${this.namespace}:*`
+      : `_watch:${this.namespace}:${key}`;
+    return ps.subscribe<TableWatchEvent<Value>>(channel, handler);
+  }
+
+  /**
+   * Write an arbitrarily large binary or string object chunked across standard KV records.
+   */
+  async putBlob(
+    key: string,
+    data: Buffer | Uint8Array | string,
+    options?: BlobOptions,
+  ): Promise<BlobMeta> {
+    return BlobStorage.putBlob(this, key, data, options);
+  }
+
+  /**
+   * Retrieve and reassemble all chunks of a large blob into a contiguous Buffer.
+   */
+  async getBlob(key: string): Promise<Buffer | undefined> {
+    return BlobStorage.getBlob(this, key);
+  }
+
+  /**
+   * Get metadata and chunk breakdown of a stored blob.
+   */
+  async getBlobMeta(key: string): Promise<BlobMeta | undefined> {
+    return BlobStorage.getBlobMeta(this, key);
+  }
+
+  /**
+   * Delete a stored blob and all its slice chunks.
+   */
+  async deleteBlob(key: string): Promise<boolean> {
+    return BlobStorage.deleteBlob(this, key);
   }
 }
 
